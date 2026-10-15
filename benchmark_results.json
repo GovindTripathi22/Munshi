@@ -1,0 +1,27 @@
+{
+  "categorization": {
+    "total_tested": 20,
+    "correct": 20,
+    "accuracy_percent": 100.0
+  },
+  "reconciliation": {
+    "total_bank_lines": 10,
+    "ground_truth_matches": 8,
+    "matched_by_agent": 8,
+    "match_rate_percent": 80.0,
+    "precision_percent": 100.0,
+    "recall_percent": 100.0,
+    "planted_unmatched_caught": 2
+  },
+  "anomaly_detection": {
+    "total_transactions": 10,
+    "planted_errors_count": 5,
+    "detected_count": 5,
+    "true_positives": 5,
+    "false_positives": 0,
+    "false_negatives": 0,
+    "precision_percent": 100.0,
+    "recall_percent": 100.0,
+    "f1_score": 100.0
+  }
+}

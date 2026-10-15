@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "munshi"
+version = "1.0.0"
+description = "Supervisor-routed multi-agent finance assistant over a double-entry ledger with Indian GST rules, audit trail, and MCP server."
+authors = [{ name = "Govind Tripathi", email = "govindtripathi62@gmail.com" }]
+license = { text = "MIT" }
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "langgraph>=1.2.0",
+    "langchain-core>=1.6.0",
+    "pydantic>=2.10.0",
+    "click>=8.0.0",
+    "rich>=13.0.0",
+    "mcp>=1.0.0",
+]
+
+[project.scripts]
+munshi = "munshi.cli:cli"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
