@@ -3,32 +3,29 @@
 from munshi.ledger.models import (
     Account,
     AccountType,
-    NormalBalance,
-    JournalEntryItem,
-    LedgerTransaction,
-    TransactionStatus,
-    DEFAULT_CHART_OF_ACCOUNTS,
+    JournalLine,
+    JournalEntry,
+    BankStatementLine,
+    AuditFlag,
+    round_Money,
 )
-from munshi.ledger.engine import (
-    DoubleEntryLedger,
-    LedgerError,
-    LedgerImbalanceError,
-    AccountNotFoundError,
-)
-from munshi.ledger.audit_trail import AuditTrail, AuditEvent
+from munshi.ledger.engine import LedgerEngine, DEFAULT_CHART
+from munshi.ledger.audit_trail import AuditTrail, AuditRecord
+
+# Backward compatibility alias
+DoubleEntryLedger = LedgerEngine
 
 __all__ = [
     "Account",
     "AccountType",
-    "NormalBalance",
-    "JournalEntryItem",
-    "LedgerTransaction",
-    "TransactionStatus",
-    "DEFAULT_CHART_OF_ACCOUNTS",
+    "JournalLine",
+    "JournalEntry",
+    "BankStatementLine",
+    "AuditFlag",
+    "round_Money",
+    "LedgerEngine",
     "DoubleEntryLedger",
-    "LedgerError",
-    "LedgerImbalanceError",
-    "AccountNotFoundError",
+    "DEFAULT_CHART",
     "AuditTrail",
-    "AuditEvent",
+    "AuditRecord",
 ]

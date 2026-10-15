@@ -1,7 +1,7 @@
 # Munshi: Multi-Agent Finance Assistant
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
-[![Tests Passing](https://img.shields.io/badge/tests-25%20passed%20%28100%25%29-brightgreen.svg)](tests/)
+[![Tests Passing](https://img.shields.io/badge/tests-5%20passed%20%28100%25%29-brightgreen.svg)](tests/)
 [![LangGraph](https://img.shields.io/badge/Orchestration-LangGraph-orange.svg)](https://github.com/langchain-ai/langgraph)
 [![MCP Server](https://img.shields.io/badge/Protocol-MCP%20Standard-purple.svg)](https://modelcontextprotocol.io/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -112,6 +112,21 @@ Add Munshi to your `claude_desktop_config.json`:
   }
 }
 ```
+
+---
+
+## 🖥️ Interactive Web Dashboard (React / TSX)
+
+Munshi includes a full-featured, responsive React/TypeScript forensic accounting dashboard located in [`frontend/MunshiDashboard.tsx`](frontend/MunshiDashboard.tsx).
+
+### Dashboard Features:
+- **Autonomous Agent Visualizer**: Step-by-step pipeline state monitor (Supervisor → Bookkeeper → GST → Reconciliation → Auditor → Reporter).
+- **Interactive Voucher Entry**: Real-time parsing of natural-language business transactions into balanced debit/credit lines.
+- **Statutory GSTIN Validator**: 15-character verification with 2-digit Indian State code mapping and PAN extraction.
+- **Section 17(5) Blocked ITC Inspector**: Automatic detection of non-creditable expenses (food, catering, club memberships).
+- **Section 194 TDS Withholding**: Auto-deduction of 10% TDS on commercial rent (Sec 194I) and professional services (Sec 194J).
+- **Bank Statement Reconciler**: Visual match confirmation with confidence score and UTR cross-referencing.
+- **Cryptographic Audit Log Visualizer**: Live SHA-256 chain inspector with a 1-click **Tamper Simulator** demonstrating instant detection of unauthorized modifications.
 
 ---
 

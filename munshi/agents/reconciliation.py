@@ -1,135 +1,76 @@
-"""Bank Reconciliation Agent: Matches bank statement lines with internal invoices."""
-
-from decimal import Decimal
-from typing import Dict, List, Any, Optional
+# munshi/agents/reconciliation.py
 from datetime import datetime
-from munshi.config import MunshiConfig
-
-
-class BankStatementLine(Dict[str, Any]):
-    """Represents a single bank statement record."""
-    pass
-
+from typing import List, Dict, Any
+from ..ledger.models import JournalEntry, JournalLine, BankStatementLine, round_Money
 
 class ReconciliationAgent:
-    """Automates bank statement vs ledger reconciliation with fuzzy matching."""
+    def __init__(self, date_tolerance_days: int = 3):
+        self.date_tolerance_days = date_tolerance_days
 
-    def __init__(self, config: Optional[MunshiConfig] = None):
-        self.config = config or MunshiConfig()
-
-    def _date_diff_days(self, date_str_1: str, date_str_2: str) -> int:
+    @staticmethod
+    def _days_between(d1: str, d2: str) -> int:
         try:
-            d1 = datetime.strptime(date_str_1[:10], "%Y-%m-%d")
-            d2 = datetime.strptime(date_str_2[:10], "%Y-%m-%d")
-            return abs((d1 - d2).days)
+            dt1 = datetime.strptime(d1[:10], "%Y-%m-%d")
+            dt2 = datetime.strptime(d2[:10], "%Y-%m-%d")
+            return abs((dt1 - dt2).days)
         except Exception:
-            return 30
+            return 0
 
-    def compute_match_score(
-        self,
-        bank_line: Dict[str, Any],
-        invoice: Dict[str, Any],
-    ) -> float:
-        """Computes a match score between 0.0 and 1.0."""
-        score = 0.0
+    def reconcile(self, entries: List[JournalEntry], bank_lines: List[BankStatementLine]) -> Dict[str, Any]:
+        matched = []
+        unmatched_bank = []
+        used_entries = set()
 
-        # 1. Amount matching (Critical - 50% of weight)
-        bank_amt = Decimal(str(bank_line.get("amount", 0)))
-        inv_amt = Decimal(str(invoice.get("amount", 0)))
-        if bank_amt == inv_amt and bank_amt > 0:
-            score += 0.50
-        elif abs(bank_amt - inv_amt) < Decimal("5.00"):
-            score += 0.35  # Minor rounding or bank fee variance
+        for bline in bank_lines:
+            bank_amt = round_Money(bline.credit if bline.credit > 0 else bline.debit)
+            best_entry = None
+            best_conf = 0.0
 
-        # 2. Reference / UTR / Invoice number match (30% of weight)
-        bank_desc = str(bank_line.get("description", "")).lower()
-        inv_ref = str(invoice.get("reference_id", "")).lower()
-        inv_no = str(invoice.get("invoice_no", "")).lower()
-
-        if inv_ref and inv_ref in bank_desc:
-            score += 0.30
-        elif inv_no and inv_no in bank_desc:
-            score += 0.30
-        else:
-            # Check counterparty name
-            party = str(invoice.get("counterparty", "")).lower()
-            if party and party in bank_desc:
-                score += 0.20
-
-        # 3. Date proximity (20% of weight)
-        bank_date = bank_line.get("date", "")
-        inv_date = invoice.get("date", "")
-        days_diff = self._date_diff_days(bank_date, inv_date)
-        if days_diff == 0:
-            score += 0.20
-        elif days_diff <= 3:
-            score += 0.15
-        elif days_diff <= 7:
-            score += 0.10
-
-        return round(min(score, 1.0), 3)
-
-    def reconcile(
-        self,
-        bank_lines: List[Dict[str, Any]],
-        internal_invoices: List[Dict[str, Any]],
-    ) -> Dict[str, Any]:
-        """
-        Reconciles bank statement items against internal ledger invoices.
-        Returns match rate, matched pairs, and un-reconciled items.
-        """
-        matched_pairs: List[Dict[str, Any]] = []
-        unmatched_bank: List[Dict[str, Any]] = []
-        matched_invoice_ids = set()
-
-        for bank_item in bank_lines:
-            best_match = None
-            best_score = 0.0
-
-            for inv in internal_invoices:
-                inv_id = inv.get("id") or inv.get("invoice_no")
-                if inv_id in matched_invoice_ids:
+            for entry in entries:
+                if entry.entry_id in used_entries:
                     continue
+                # Find bank line in journal entry
+                bank_je_lines = [l for l in entry.lines if l.account_code == "1010"]
+                if not bank_je_lines:
+                    continue
+                je_amt = round_Money(bank_je_lines[0].debit if bank_je_lines[0].debit > 0 else bank_je_lines[0].credit)
 
-                score = self.compute_match_score(bank_item, inv)
-                if score > best_score:
-                    best_score = score
-                    best_match = inv
+                if abs(bank_amt - je_amt) < 0.01:
+                    if bline.utr and entry.utr and bline.utr.upper() == entry.utr.upper():
+                        best_entry = entry
+                        best_conf = 1.0
+                        break
+                    days_diff = self._days_between(bline.date, entry.date)
+                    if days_diff <= self.date_tolerance_days:
+                        best_entry = entry
+                        best_conf = round(0.95 - days_diff * 0.03, 2)
 
-            if best_score >= self.config.auto_approve_reconciliation_confidence and best_match:
-                inv_id = best_match.get("id") or best_match.get("invoice_no")
-                matched_invoice_ids.add(inv_id)
-                matched_pairs.append({
-                    "bank_line_id": bank_item.get("id"),
-                    "invoice_id": inv_id,
-                    "amount": str(bank_item.get("amount")),
-                    "match_score": best_score,
-                    "status": "MATCHED",
-                })
+            if best_entry:
+                used_entries.add(best_entry.entry_id)
+                bline.matched_entry_id = best_entry.entry_id
+                bline.confidence = best_conf
+                matched.append({"bank_line_id": bline.line_id, "entry_id": best_entry.entry_id, "amount": bank_amt, "confidence": best_conf})
             else:
-                unmatched_bank.append({
-                    "bank_line": bank_item,
-                    "closest_score": best_score,
-                    "closest_invoice": best_match.get("invoice_no") if best_match else None,
-                    "reason": "Low confidence match" if best_score > 0.4 else "No corresponding invoice found",
-                })
-
-        unmatched_invoices = [
-            inv for inv in internal_invoices
-            if (inv.get("id") or inv.get("invoice_no")) not in matched_invoice_ids
-        ]
-
-        total_bank_count = len(bank_lines)
-        match_rate = (len(matched_pairs) / total_bank_count * 100) if total_bank_count > 0 else 100.0
+                unmatched_bank.append(bline)
 
         return {
-            "total_bank_lines": total_bank_count,
-            "matched_count": len(matched_pairs),
+            "matched_count": len(matched),
             "unmatched_bank_count": len(unmatched_bank),
-            "unmatched_invoice_count": len(unmatched_invoices),
-            "match_rate_percent": round(match_rate, 2),
-            "matches": matched_pairs,
+            "matches": matched,
             "unmatched_bank_lines": unmatched_bank,
-            "unmatched_invoices": unmatched_invoices,
-            "requires_review": len(unmatched_bank) > 0 or len(unmatched_invoices) > 0,
         }
+
+    def create_adjustment_entry_for_bank_charge(self, bline: BankStatementLine) -> JournalEntry:
+        amt = round_Money(bline.debit or bline.credit)
+        return JournalEntry(
+            entry_id=f"JE-ADJ-{bline.line_id}",
+            date=bline.date,
+            narration=f"Auto-Reconciled Bank Charge: {bline.description}",
+            utr=bline.utr,
+            payment_mode="BANK",
+            status="POSTED",
+            lines=[
+                JournalLine("5600", "Bank Charges", debit=amt, credit=0.0),
+                JournalLine("1010", "HDFC Bank Current A/c", debit=0.0, credit=amt),
+            ],
+        )
