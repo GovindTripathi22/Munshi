@@ -1,31 +1,9 @@
-"""Ledger package initialization."""
-
-from munshi.ledger.models import (
-    Account,
-    AccountType,
-    JournalLine,
-    JournalEntry,
-    BankStatementLine,
-    AuditFlag,
-    round_Money,
-)
-from munshi.ledger.engine import LedgerEngine, DEFAULT_CHART
-from munshi.ledger.audit_trail import AuditTrail, AuditRecord
-
-# Backward compatibility alias
-DoubleEntryLedger = LedgerEngine
+# munshi/ledger/__init__.py
+from .models import Account, JournalLine, JournalEntry, BankStatementLine, AuditFlag, round_money
+from .audit_trail import AuditRecord, AuditTrail
+from .engine import LedgerEngine, DEFAULT_CHART
 
 __all__ = [
-    "Account",
-    "AccountType",
-    "JournalLine",
-    "JournalEntry",
-    "BankStatementLine",
-    "AuditFlag",
-    "round_Money",
-    "LedgerEngine",
-    "DoubleEntryLedger",
-    "DEFAULT_CHART",
-    "AuditTrail",
-    "AuditRecord",
+    "Account", "JournalLine", "JournalEntry", "BankStatementLine", "AuditFlag",
+    "round_money", "AuditRecord", "AuditTrail", "LedgerEngine", "DEFAULT_CHART"
 ]

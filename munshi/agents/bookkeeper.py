@@ -1,7 +1,7 @@
 # munshi/agents/bookkeeper.py
 import re
-from typing import Dict, Any, List
-from ..ledger.models import JournalEntry, JournalLine, round_Money
+from typing import List
+from ..ledger.models import JournalEntry, JournalLine, round_money
 from .gst import GSTAgent
 
 class BookkeeperAgent:
@@ -15,9 +15,19 @@ class BookkeeperAgent:
         eid = entry_id or f"JE-{self._seq}"
         lower = raw_text.lower()
 
+        lakh_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:lakh|lakhs|lac|lacs)", lower)
+        crore_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:crore|crores|cr)\b", lower)
         amt_match = re.search(r"(?:₹|rs\.?|inr)\s*([\d,]+(?:\.\d{1,2})?)|(\d[\d,]{2,}(?:\.\d{1,2})?)", raw_text, re.I)
-        raw_amt = (amt_match.group(1) or amt_match.group(2)).replace(",", "") if amt_match else "10000"
-        base_amount = round_Money(float(raw_amt))
+
+        if crore_match:
+            base_amount = round_money(float(crore_match.group(1)) * 10000000.0)
+        elif lakh_match:
+            base_amount = round_money(float(lakh_match.group(1)) * 100000.0)
+        elif amt_match:
+            raw_amt = (amt_match.group(1) or amt_match.group(2)).replace(",", "")
+            base_amount = round_money(float(raw_amt))
+        else:
+            base_amount = 10000.0
 
         is_cash = "cash" in lower
         pay_code, pay_name = ("1000", "Cash in Hand") if is_cash else ("1010", "HDFC Bank Current A/c")
@@ -56,11 +66,11 @@ class BookkeeperAgent:
 
         tds = 0.0
         if not is_revenue and (is_rent or is_prof) and base_amount >= 20000:
-            tds = round_Money(base_amount * 0.10)
+            tds = round_money(base_amount * 0.10)
 
         lines: List[JournalLine] = []
         if is_revenue:
-            gross = round_Money(base_amount + total_gst)
+            gross = round_money(base_amount + total_gst)
             lines.append(JournalLine(pay_code, pay_name, debit=gross, credit=0.0))
             lines.append(JournalLine("4100", "SaaS & Consulting Revenue", debit=0.0, credit=base_amount))
             if igst > 0:
@@ -69,7 +79,7 @@ class BookkeeperAgent:
                 lines.append(JournalLine("2110", "Output CGST Payable", debit=0.0, credit=cgst))
                 lines.append(JournalLine("2120", "Output SGST Payable", debit=0.0, credit=sgst))
         elif is_food:
-            gross = round_Money(base_amount + total_gst)
+            gross = round_money(base_amount + total_gst)
             lines.append(JournalLine("5400", "Staff Welfare & Blocked ITC Expense", debit=gross, credit=0.0))
             lines.append(JournalLine(pay_code, pay_name, debit=0.0, credit=gross))
         else:
@@ -91,7 +101,7 @@ class BookkeeperAgent:
                 lines.append(JournalLine("1220", "Input SGST Receivable", debit=sgst, credit=0.0))
             if tds > 0:
                 lines.append(JournalLine("2200", "TDS Payable", debit=0.0, credit=tds))
-            net_pay = round_Money(base_amount + total_gst - tds)
+            net_pay = round_money(base_amount + total_gst - tds)
             lines.append(JournalLine(pay_code, pay_name, debit=0.0, credit=net_pay))
 
         gross_val = base_amount + total_gst

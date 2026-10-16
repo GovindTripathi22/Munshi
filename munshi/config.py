@@ -10,7 +10,7 @@ class MunshiConfig:
     currency: str = "INR"
     hitl_threshold_inr: float = 50000.0
     cash_limit_sec_40a3_inr: float = 10000.0
-    reconciliation_date_Window_days: int = 3
+    reconciliation_date_window_days: int = 3
     gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
     model_name: str = os.getenv("MUNSHI_MODEL", "gemini-2.5-flash")

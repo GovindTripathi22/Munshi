@@ -1,6 +1,6 @@
 # munshi/ledger/engine.py
 from typing import Dict, List, Any, Optional
-from .models import Account, JournalEntry, JournalLine, round_Money
+from .models import Account, JournalEntry, JournalLine, round_money
 from .audit_trail import AuditTrail
 
 DEFAULT_CHART: List[Account] = [
@@ -81,19 +81,19 @@ class LedgerEngine:
             return 0.0
         dr = sum(l.debit for e in self.posted_entries() for l in e.lines if l.account_code == account_code)
         cr = sum(l.credit for e in self.posted_entries() for l in e.lines if l.account_code == account_code)
-        return round_Money(dr - cr if acct.normal_side == "DEBIT" else cr - dr)
+        return round_money(dr - cr if acct.normal_side == "DEBIT" else cr - dr)
 
     def get_trial_balance(self) -> Dict[str, Any]:
         rows = []
         total_dr = 0.0
         total_cr = 0.0
         for code, acct in sorted(self.accounts.items()):
-            dr = round_Money(sum(l.debit for e in self.posted_entries() for l in e.lines if l.account_code == code))
-            cr = round_Money(sum(l.credit for e in self.posted_entries() for l in e.lines if l.account_code == code))
+            dr = round_money(sum(l.debit for e in self.posted_entries() for l in e.lines if l.account_code == code))
+            cr = round_money(sum(l.credit for e in self.posted_entries() for l in e.lines if l.account_code == code))
             if dr > 0 or cr > 0:
                 rows.append({"code": code, "name": acct.name, "type": acct.account_type, "debit": dr, "credit": cr})
-                total_dr = round_Money(total_dr + dr)
-                total_cr = round_Money(total_cr + cr)
+                total_dr = round_money(total_dr + dr)
+                total_cr = round_money(total_cr + cr)
         return {
             "rows": rows,
             "total_debit": total_dr,
@@ -104,9 +104,9 @@ class LedgerEngine:
     def get_profit_and_loss(self) -> Dict[str, Any]:
         revenues = {a.code: self.get_account_balance(a.code) for a in self.accounts.values() if a.account_type == "REVENUE"}
         expenses = {a.code: self.get_account_balance(a.code) for a in self.accounts.values() if a.account_type == "EXPENSE"}
-        total_rev = round_Money(sum(revenues.values()))
-        total_exp = round_Money(sum(expenses.values()))
-        net_profit = round_Money(total_rev - total_exp)
+        total_rev = round_money(sum(revenues.values()))
+        total_exp = round_money(sum(expenses.values()))
+        net_profit = round_money(total_rev - total_exp)
         return {
             "total_revenue": total_rev,
             "total_expense": total_exp,
@@ -120,9 +120,9 @@ class LedgerEngine:
         assets = {a.code: self.get_account_balance(a.code) for a in self.accounts.values() if a.account_type == "ASSET"}
         liabilities = {a.code: self.get_account_balance(a.code) for a in self.accounts.values() if a.account_type == "LIABILITY"}
         equity = {a.code: self.get_account_balance(a.code) for a in self.accounts.values() if a.account_type == "EQUITY"}
-        total_assets = round_Money(sum(assets.values()))
-        total_liabilities = round_Money(sum(liabilities.values()))
-        total_equity = round_Money(sum(equity.values()) + pnl["net_profit"])
+        total_assets = round_money(sum(assets.values()))
+        total_liabilities = round_money(sum(liabilities.values()))
+        total_equity = round_money(sum(equity.values()) + pnl["net_profit"])
         return {
             "total_assets": total_assets,
             "total_liabilities": total_liabilities,
@@ -130,6 +130,3 @@ class LedgerEngine:
             "retained_earnings": pnl["net_profit"],
             "is_balanced": abs(total_assets - (total_liabilities + total_equity)) < 0.01,
         }
-
-DoubleEntryLedger = LedgerEngine
-

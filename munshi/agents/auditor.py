@@ -25,7 +25,6 @@ class AuditorAgent:
             )
 
         for idx, entry in enumerate(entries):
-            # 1. Section 40A(3) Income Tax Act: Cash expenditure > ₹10,000 in a day
             if entry.payment_mode == "CASH" and entry.total_debit > self.cash_limit:
                 flags.append(
                     AuditFlag(
@@ -38,7 +37,6 @@ class AuditorAgent:
                     )
                 )
 
-            # 2. High-Value HITL Governance Check (> ₹50,000)
             is_capital_or_sales = any(l.account_code in ("3000", "4000", "4100") for l in entry.lines)
             if not is_capital_or_sales and entry.total_debit > self.hitl_threshold:
                 flags.append(
@@ -52,7 +50,6 @@ class AuditorAgent:
                     )
                 )
 
-            # 3. Duplicate Voucher / Double Payment Check
             sig = (entry.party.lower().strip(), entry.total_debit, entry.date)
             if sig in seen_signatures:
                 prev_id = seen_signatures[sig]

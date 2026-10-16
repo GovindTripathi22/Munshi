@@ -6,8 +6,11 @@ from decimal import Decimal, ROUND_HALF_UP
 
 AccountType = Literal["ASSET", "LIABILITY", "EQUITY", "REVENUE", "EXPENSE"]
 
-def round_Money(val: float | Decimal) -> float:
+def round_money(val: float | Decimal) -> float:
     return float(Decimal(str(val)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+# Alias for backward compatibility
+round_Money = round_money
 
 @dataclass
 class Account:
@@ -27,8 +30,8 @@ class JournalLine:
     credit: float = 0.0
 
     def __post_init__(self):
-        self.debit = round_Money(self.debit)
-        self.credit = round_Money(self.credit)
+        self.debit = round_money(self.debit)
+        self.credit = round_money(self.credit)
         if self.debit < 0 or self.credit < 0:
             raise ValueError("Debit and credit amounts must be non-negative.")
         if self.debit > 0 and self.credit > 0:
@@ -54,11 +57,11 @@ class JournalEntry:
 
     @property
     def total_debit(self) -> float:
-        return round_Money(sum(l.debit for l in self.lines))
+        return round_money(sum(l.debit for l in self.lines))
 
     @property
     def total_credit(self) -> float:
-        return round_Money(sum(l.credit for l in self.lines))
+        return round_money(sum(l.credit for l in self.lines))
 
     @property
     def is_balanced(self) -> bool:
