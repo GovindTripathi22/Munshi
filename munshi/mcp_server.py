@@ -1,6 +1,7 @@
 """Model Context Protocol (MCP) Server for Munshi."""
 
 import json
+from datetime import date
 from decimal import Decimal
 from typing import Dict, Any, List, Optional
 
@@ -22,7 +23,7 @@ from munshi.agents.reporter import ReportingAgent
 
 # Instantiate shared global components
 config = MunshiConfig()
-ledger = DoubleEntryLedger()
+ledger = DoubleEntryLedger(config.db_path)
 bookkeeper = BookkeeperAgent(config)
 gst_agent = GSTComputationAgent(config)
 reconciler = ReconciliationAgent(config)
@@ -39,6 +40,7 @@ def record_transaction(
     is_sale: bool = False,
     counterparty_gstin: Optional[str] = None,
     payment_method: str = "BANK",
+    counterparty: str = "",
 ) -> str:
     """
     Categorizes and records a transaction into the double-entry ledger.
@@ -47,12 +49,13 @@ def record_transaction(
     tx_id = f"TXN-{len(ledger.transactions) + 1:04d}"
     tx = bookkeeper.create_journal_transaction(
         tx_id=tx_id,
-        date="2026-10-15",
+        date=date.today().isoformat(),
         description=description,
         amount=Decimal(str(amount)),
         is_sale=is_sale,
         counterparty_gstin=counterparty_gstin,
         payment_method=payment_method,
+        counterparty=counterparty,
     )
     posted = ledger.post_transaction(tx, actor="mcp:client")
     

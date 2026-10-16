@@ -1,6 +1,7 @@
 """LangGraph StateGraph builder for Munshi Multi-Agent Finance Assistant."""
 
 from decimal import Decimal
+from datetime import date
 from typing import Dict, Any, Optional
 from langgraph.graph import StateGraph, START, END
 
@@ -24,7 +25,7 @@ def create_munshi_graph(
     Constructs and compiles the supervisor-routed multi-agent LangGraph workflow.
     """
     conf = config or MunshiConfig()
-    led = ledger or DoubleEntryLedger()
+    led = ledger or DoubleEntryLedger(conf.db_path)
 
     supervisor = SupervisorAgent(conf)
     bookkeeper = BookkeeperAgent(conf)
@@ -52,10 +53,11 @@ def create_munshi_graph(
         counterparty_gstin = tx_data.get("counterparty_gstin")
         is_sale = tx_data.get("is_sale", False)
         payment_method = tx_data.get("payment_method", "BANK")
-        date_str = tx_data.get("date", "2026-10-15")
+        date_str = tx_data.get("date", date.today().isoformat())
         tx_id = tx_data.get("id", f"TXN-{date_str[:10]}-001")
 
-        classification = bookkeeper.classify_transaction(description)
+        counterparty = tx_data.get("counterparty", "")
+        classification = bookkeeper.classify_transaction(description, counterparty)
         tx = bookkeeper.create_journal_transaction(
             tx_id=tx_id,
             date=date_str,
@@ -64,6 +66,7 @@ def create_munshi_graph(
             is_sale=is_sale,
             counterparty_gstin=counterparty_gstin,
             payment_method=payment_method,
+            counterparty=counterparty,
         )
 
         requires_approval = (

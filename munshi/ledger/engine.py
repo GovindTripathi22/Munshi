@@ -1,6 +1,7 @@
 """Double-entry ledger engine enforcing strict accounting invariants."""
 
 import sqlite3
+import json
 from decimal import Decimal
 from typing import Dict, List, Optional, Tuple, Any
 from copy import deepcopy
@@ -67,7 +68,8 @@ class DoubleEntryLedger:
                     requires_approval INTEGER NOT NULL,
                     approved INTEGER NOT NULL,
                     approved_by TEXT,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}'
                 )
             """)
             cursor.execute("""
@@ -81,6 +83,79 @@ class DoubleEntryLedger:
                     FOREIGN KEY (transaction_id) REFERENCES transactions (id)
                 )
             """)
+            # Older ledger files were created before transaction metadata was stored.
+            columns = {row[1] for row in cursor.execute("PRAGMA table_info(transactions)")}
+            if "metadata_json" not in columns:
+                cursor.execute("ALTER TABLE transactions ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}' ")
+            conn.commit()
+        self._load_from_sqlite()
+
+    def _load_from_sqlite(self) -> None:
+        """Restore transactions and rebuild account balances from posted journal lines."""
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute(
+                "SELECT id, date, reference_id, description, status, requires_approval, "
+                "approved, approved_by, created_at, metadata_json FROM transactions ORDER BY rowid"
+            ).fetchall()
+            for row in rows:
+                tx_id, date, reference_id, description, status, requires_approval, approved, approved_by, created_at, metadata_json = row
+                item_rows = conn.execute(
+                    "SELECT account_code, debit, credit, narration FROM journal_items WHERE transaction_id = ? ORDER BY id",
+                    (tx_id,),
+                ).fetchall()
+                items = [
+                    JournalEntryItem(
+                        account_code=code,
+                        debit=Decimal(debit),
+                        credit=Decimal(credit),
+                        narration=narration or "",
+                    )
+                    for code, debit, credit, narration in item_rows
+                ]
+                tx = LedgerTransaction(
+                    id=tx_id,
+                    date=date,
+                    reference_id=reference_id or "",
+                    description=description,
+                    items=items,
+                    status=TransactionStatus(status),
+                    requires_approval=bool(requires_approval),
+                    approved=bool(approved),
+                    approved_by=approved_by,
+                    created_at=created_at,
+                    metadata=json.loads(metadata_json or "{}"),
+                )
+                self.transactions[tx_id] = tx
+                if tx.status == TransactionStatus.POSTED:
+                    for item in items:
+                        self.accounts[item.account_code].update_balance(item.debit, item.credit)
+
+    def _save_transaction(self, tx: LedgerTransaction) -> None:
+        """Persist a transaction and its journal lines in one SQLite transaction."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("PRAGMA foreign_keys = ON")
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "INSERT INTO transactions (id, date, reference_id, description, status, total_debits, "
+                "total_credits, requires_approval, approved, approved_by, created_at, metadata_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET date=excluded.date, reference_id=excluded.reference_id, "
+                "description=excluded.description, status=excluded.status, total_debits=excluded.total_debits, "
+                "total_credits=excluded.total_credits, requires_approval=excluded.requires_approval, "
+                "approved=excluded.approved, approved_by=excluded.approved_by, "
+                "created_at=excluded.created_at, metadata_json=excluded.metadata_json",
+                (
+                    tx.id, tx.date, tx.reference_id, tx.description, tx.status.value,
+                    str(tx.total_debits()), str(tx.total_credits()), int(tx.requires_approval),
+                    int(tx.approved), tx.approved_by, tx.created_at, json.dumps(tx.metadata),
+                ),
+            )
+            conn.execute("DELETE FROM journal_items WHERE transaction_id = ?", (tx.id,))
+            conn.executemany(
+                "INSERT INTO journal_items (transaction_id, account_code, debit, credit, narration) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [(tx.id, item.account_code, str(item.debit), str(item.credit), item.narration) for item in tx.items],
+            )
             conn.commit()
 
     def get_account(self, code: str) -> Account:
@@ -120,9 +195,22 @@ class DoubleEntryLedger:
                 f"Difference: {total_dr - total_cr}."
             )
 
+        existing = self.transactions.get(transaction.id)
+        if existing and existing.status == TransactionStatus.POSTED:
+            same_entry = (
+                existing.date == transaction.date
+                and existing.reference_id == transaction.reference_id
+                and existing.description == transaction.description
+                and existing.items == transaction.items
+            )
+            if same_entry:
+                return existing
+            raise LedgerError(f"Transaction ID {transaction.id} has already been posted with different contents.")
+
         # Check if transaction requires human approval
         if transaction.requires_approval and not transaction.approved and not force_approval:
             transaction.status = TransactionStatus.PENDING_APPROVAL
+            self._save_transaction(transaction)
             self.transactions[transaction.id] = transaction
             self.audit_trail.log(
                 event_type="TRANSACTION_PENDING_APPROVAL",
@@ -136,12 +224,14 @@ class DoubleEntryLedger:
             )
             return transaction
 
-        # Post entries to account balances
+        transaction.status = TransactionStatus.POSTED
+        self._save_transaction(transaction)
+
+        # Post entries to account balances only after the durable write succeeds.
         for item in transaction.items:
             acc = self.accounts[item.account_code]
             acc.update_balance(debit=item.debit, credit=item.credit)
 
-        transaction.status = TransactionStatus.POSTED
         self.transactions[transaction.id] = transaction
 
         # Log to immutable audit trail
@@ -180,6 +270,7 @@ class DoubleEntryLedger:
 
         tx = self.transactions[transaction_id]
         tx.status = TransactionStatus.REJECTED
+        self._save_transaction(tx)
         self.audit_trail.log(
             event_type="TRANSACTION_REJECTED",
             actor=approver,

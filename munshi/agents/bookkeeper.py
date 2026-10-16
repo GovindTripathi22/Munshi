@@ -94,12 +94,13 @@ class BookkeeperAgent:
         counterparty_gstin: Optional[str] = None,
         gst_rate: Optional[Decimal] = None,
         payment_method: str = "BANK",  # "BANK" or "CASH" or "CREDIT"
+        counterparty: str = "",
     ) -> LedgerTransaction:
         """
         Creates a balanced double-entry transaction including applicable GST.
         Enforces Debits == Credits strictly.
         """
-        classification = self.classify_transaction(description)
+        classification = self.classify_transaction(description, counterparty)
         selected_account = classification["account_code"]
         rate = gst_rate if gst_rate is not None else classification["default_rate"]
 

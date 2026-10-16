@@ -36,7 +36,7 @@ def chat():
         "[dim]LangGraph Supervisor | Double-Entry Invariants | Indian GST | Audit Trail[/dim]",
         border_style="green"
     ))
-    ledger = DoubleEntryLedger()
+    ledger = DoubleEntryLedger(MunshiConfig().db_path)
     graph = create_munshi_graph(ledger=ledger)
 
     while True:
@@ -84,7 +84,7 @@ def chat():
 @click.option("--type", "report_type", type=click.Choice(["trial_balance", "pnl", "gst"]), default="trial_balance")
 def report(report_type):
     """Generates financial statements (trial balance, P&L, GST)."""
-    ledger = DoubleEntryLedger()
+    ledger = DoubleEntryLedger(MunshiConfig().db_path)
     # Add seed transactions for demonstration
     bookkeeper = BookkeeperAgent()
     tx1 = bookkeeper.create_journal_transaction(
