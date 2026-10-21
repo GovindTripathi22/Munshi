@@ -73,3 +73,65 @@ class ReconciliationAgent:
                 JournalLine("1010", "HDFC Bank Current A/c", debit=0.0, credit=amt),
             ],
         )
+
+    def reconcile_invoices(self, invoices: List[Dict[str, Any]], bank_lines: List[Dict[str, Any]]) -> Dict[str, Any]:
+        matched = []
+        unmatched_bank = []
+        used_invoices = set()
+        correct_matches = 0
+        planted_caught = 0
+        ground_truth_matches = sum(1 for b in bank_lines if b.get("expected_match"))
+
+        for bline in bank_lines:
+            desc = bline.get("description", "")
+            amt = float(bline.get("amount", 0.0))
+            best_inv = None
+
+            for inv in invoices:
+                if inv.get("id") in used_invoices:
+                    continue
+                inv_amt = float(inv.get("amount", 0.0))
+                inv_ref = inv.get("reference_id", "")
+                if inv_ref and inv_ref.upper() in desc.upper():
+                    best_inv = inv
+                    break
+                if abs(inv_amt - amt) < 0.01:
+                    days_diff = self._days_between(bline.get("date", ""), inv.get("date", ""))
+                    if days_diff <= self.date_tolerance_days:
+                        best_inv = inv
+
+            if best_inv:
+                used_invoices.add(best_inv["id"])
+                is_correct = bline.get("expected_match") == best_inv["id"]
+                if is_correct:
+                    correct_matches += 1
+                matched.append({
+                    "bank_line_id": bline.get("id"),
+                    "invoice_id": best_inv.get("id"),
+                    "amount": amt,
+                    "confidence": 1.0 if (best_inv.get("reference_id") and best_inv.get("reference_id") in desc) else 0.95,
+                    "correct": is_correct,
+                })
+            else:
+                unmatched_bank.append(bline)
+                if bline.get("is_anomaly") or bline.get("expected_match") is None:
+                    planted_caught += 1
+
+        total_bank = len(bank_lines)
+        matched_count = len(matched)
+        precision = round((correct_matches / matched_count * 100.0) if matched_count else 0.0, 2)
+        recall = round((correct_matches / ground_truth_matches * 100.0) if ground_truth_matches else 0.0, 2)
+        match_rate = round((matched_count / total_bank * 100.0) if total_bank else 0.0, 2)
+
+        return {
+            "total_bank_lines": total_bank,
+            "ground_truth_matches": ground_truth_matches,
+            "matched_by_agent": matched_count,
+            "match_rate_percent": match_rate,
+            "precision_percent": precision,
+            "recall_percent": recall,
+            "planted_unmatched_caught": planted_caught,
+            "matches": matched,
+            "unmatched_bank_lines": unmatched_bank,
+        }
+

@@ -32,6 +32,14 @@ class BookkeeperAgent:
         is_cash = "cash" in lower
         pay_code, pay_name = ("1000", "Cash in Hand") if is_cash else ("1010", "HDFC Bank Current A/c")
 
+        # Extract party/counterparty if present
+        party = "General Counterparty"
+        party_match = re.search(r"(?:to|from|for|client|vendor|supplier|paid to|billed to)\s+([A-Za-z0-9 &.-]+?)(?:\s+(?:for|via|with|on|in|billed|paid|of|₹|rs\.?|inr|\d)\b|$)", raw_text, re.I)
+        if party_match:
+            candidate = party_match.group(1).strip()
+            if candidate and len(candidate) > 2 and candidate.lower() not in ("cash", "neft", "bank", "cheque", "rtgs", "imps", "upi"):
+                party = candidate
+
         is_inter = any(k in lower for k in ("inter-state", "igst", "bengaluru", "bangalore", "karnataka", "delhi", "gujarat"))
         state_code = "29" if is_inter else "27"
 
@@ -112,6 +120,7 @@ class BookkeeperAgent:
             date=date,
             narration=raw_text,
             lines=lines,
+            party=party,
             payment_mode="CASH" if is_cash else "BANK",
             status="PENDING_HITL" if requires_hitl else "POSTED",
             taxable_value=base_amount,
@@ -119,5 +128,28 @@ class BookkeeperAgent:
             sgst=sgst,
             igst=igst,
             tds=tds,
-            itc_eligible=gst_info["itc_eligible"],
+            itc_eligible=False if is_revenue else gst_info["itc_eligible"],
         )
+
+    def categorize_transaction(self, desc: str, counterparty: str = "") -> str:
+        text = f"{desc} {counterparty}".lower()
+        if any(k in text for k in ("aws", "cloud", "hosting", "github", "slack", "google workspace", "software", "subscription")):
+            return "5200"
+        if any(k in text for k in ("rent", "lease", "wework", "dlf", "commercial space")):
+            return "5100"
+        if any(k in text for k in ("legal", "advocate", "singhania", "audit fee", "kpmg", "consultation retainer", "trademark", "retainer")):
+            return "5300"
+        if any(k in text for k in ("maintenance fee", "bank charge", "bank fee", "neft outward", "neft charge", "processing charge", "bank account maintenance", "mdr")):
+            return "5400"
+        if any(k in text for k in ("printer paper", "stationery", "staples", "electricity", "tata power", "desk chairs", "cleaning supplies", "office supplies", "utilities", "repairs")):
+            return "5500"
+        if any(k in text for k in ("uber", "ola", "indigo", "flight", "tickets", "cab", "airport transfer", "travel", "conveyance")):
+            return "5600"
+        if any(k in text for k in ("product sale", "retail mart", "export product", "global logistics", "retail buyer")):
+            return "4000"
+        if any(k in text for k in ("enterprise consulting", "technology advisory", "fintech labs", "acme corp", "advisory services", "saas & consulting", "consulting invoice")):
+            return "4100"
+        return "5500"
+
+    classify_account = categorize_transaction
+

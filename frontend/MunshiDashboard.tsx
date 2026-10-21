@@ -416,7 +416,7 @@ function parseTransactionWithMunshiSLM(rawPrompt, existingEntriesCount = 6) {
  * ============================================================================
  * 4. COMPLETE 28-FILE PYTHON REPOSITORY BUNDLE FOR `Munshi`
  * ============================================================================
- * Matches EVERY file in `Munshi-ff5eb1b76480d0173139bf143d6364607d969f85`
+ * Matches EVERY file in the `Munshi` repository
  * including `state.py`, `supervisor.py`, `reporter.py`, `cli.py`,
  * `evaluation/*`, and all 8 individual `tests/test_*.py` suites!
  */
@@ -1627,8 +1627,8 @@ def test_mcp_server_tools():
 
 export default function MunshiApp() {
   const [activeTab, setActiveTab] = useState('pipeline');
-  const [journalEntries, setJournalEntries] = useState(INITIAL_JOURNAL_ENTRIES);
-  const [bankLines, setBankLines] = useState(INITIAL_BANK_STATEMENT);
+  const [journalEntries, setJournalEntries] = useState<any[]>(INITIAL_JOURNAL_ENTRIES);
+  const [bankLines, setBankLines] = useState<any[]>(INITIAL_BANK_STATEMENT);
   const [promptInput, setPromptInput] = useState('');
   const [voucherFilter, setVoucherFilter] = useState('ALL');
   const [gstinInput, setGstinInput] = useState('29AAACI1681G1Z0');
@@ -1683,13 +1683,13 @@ export default function MunshiApp() {
 
   // Compute Trial Balance, P&L, and Balance Sheet dynamically from postedEntries
   const financials = useMemo(() => {
-    const acctMap = {};
+    const acctMap: Record<string, any> = {};
     CHART_OF_ACCOUNTS.forEach(a => {
       acctMap[a.code] = { ...a, debit: 0, credit: 0, balance: 0 };
     });
 
     postedEntries.forEach(entry => {
-      entry.lines.forEach(line => {
+      entry.lines.forEach((line: any) => {
         if (!acctMap[line.accountCode]) {
           acctMap[line.accountCode] = {
             code: line.accountCode,
@@ -1706,7 +1706,7 @@ export default function MunshiApp() {
       });
     });
 
-    const activeRows = [];
+    const activeRows: any[] = [];
     let totalDr = 0;
     let totalCr = 0;
     let totalRev = 0;
@@ -1715,7 +1715,7 @@ export default function MunshiApp() {
     let totalLiab = 0;
     let totalEquityBase = 0;
 
-    Object.values(acctMap).forEach(a => {
+    Object.values(acctMap).forEach((a: any) => {
       a.balance = roundMoney(a.normal === 'DEBIT' ? a.debit - a.credit : a.credit - a.debit);
       if (a.debit > 0 || a.credit > 0) {
         activeRows.push(a);
@@ -2002,7 +2002,7 @@ export default function MunshiApp() {
       2
     );
     return `# apply_munshi_upgrade.py
-# Run inside your Munshi-ff5eb1b76480d0173139bf143d6364607d969f85 root folder:
+# Run inside your Munshi root folder:
 #   python apply_munshi_upgrade.py && pytest -v
 import os
 import json

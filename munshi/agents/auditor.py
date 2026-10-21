@@ -1,5 +1,5 @@
 # munshi/agents/auditor.py
-from typing import List
+from typing import List, Dict, Any
 from ..ledger.models import JournalEntry, AuditFlag
 from ..ledger.audit_trail import AuditTrail
 
@@ -67,3 +67,68 @@ class AuditorAgent:
                 seen_signatures[sig] = entry.entry_id
 
         return flags
+
+    def audit_transaction_records(self, transactions: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Audit batch of invoice/transaction records (e.g. synthetic anomaly benchmark)
+        Flags:
+        - DUPLICATE_INVOICE: repeated invoice_no
+        - INVALID_GST_RATE: non-statutory GST rate outside [0.0, 0.05, 0.12, 0.18, 0.28]
+        - TAX_TOTAL_MISMATCH: taxable_value + tax_amount != total_amount
+        """
+        seen_invoices = set()
+        valid_gst_rates = {0.0, 0.05, 0.12, 0.18, 0.28}
+        flagged = []
+        planted_errors_count = sum(1 for t in transactions if t.get("is_planted_error"))
+        true_positives = 0
+        false_positives = 0
+
+        for t in transactions:
+            inv_no = t.get("invoice_no")
+            gst_rate = round(float(t.get("gst_rate", 0.0)), 2)
+            taxable = float(t.get("taxable_value", 0.0))
+            tax = float(t.get("tax_amount", 0.0))
+            total = float(t.get("total_amount", 0.0))
+
+            detected_error = None
+
+            if inv_no in seen_invoices:
+                detected_error = "DUPLICATE_INVOICE"
+            elif gst_rate not in valid_gst_rates:
+                detected_error = "INVALID_GST_RATE"
+            elif abs((taxable + tax) - total) > 0.01:
+                detected_error = "TAX_TOTAL_MISMATCH"
+
+            seen_invoices.add(inv_no)
+
+            is_planted = t.get("is_planted_error", False)
+            if detected_error:
+                if is_planted:
+                    true_positives += 1
+                else:
+                    false_positives += 1
+                flagged.append({
+                    "id": t.get("id"),
+                    "invoice_no": inv_no,
+                    "error_type": detected_error,
+                    "is_planted": is_planted,
+                })
+
+        false_negatives = planted_errors_count - true_positives
+        precision = round((true_positives / (true_positives + false_positives) * 100.0) if (true_positives + false_positives) else 0.0, 2)
+        recall = round((true_positives / planted_errors_count * 100.0) if planted_errors_count else 0.0, 2)
+        f1 = round((2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0, 2)
+
+        return {
+            "total_transactions": len(transactions),
+            "planted_errors_count": planted_errors_count,
+            "detected_count": len(flagged),
+            "true_positives": true_positives,
+            "false_positives": false_positives,
+            "false_negatives": false_negatives,
+            "precision_percent": precision,
+            "recall_percent": recall,
+            "f1_score": f1,
+            "flagged": flagged,
+        }
+

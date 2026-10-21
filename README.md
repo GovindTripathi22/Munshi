@@ -1,7 +1,7 @@
 # Munshi: Multi-Agent Finance Assistant
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
-[![Tests Passing](https://img.shields.io/badge/tests-5%20passed%20%28100%25%29-brightgreen.svg)](tests/)
+[![Tests Passing](https://img.shields.io/badge/tests-35%20passed%20%28100%25%29-brightgreen.svg)](tests/)
 [![LangGraph](https://img.shields.io/badge/Orchestration-LangGraph-orange.svg)](https://github.com/langchain-ai/langgraph)
 [![MCP Server](https://img.shields.io/badge/Protocol-MCP%20Standard-purple.svg)](https://modelcontextprotocol.io/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -147,17 +147,30 @@ cp .env.example .env
 # Fill in optional GEMINI_API_KEY or company details
 ```
 
-### 3. Run the Evaluation Benchmark
+### 3. Post Transactions via CLI
 ```bash
-python -m munshi.cli benchmark
+# Post any natural language accounting voucher
+python -m munshi.cli "Sold SaaS subscription to Bengaluru client for ₹50,000"
+
+# Explicit post command
+python -m munshi.cli post "Paid office rent ₹30,000 to Mumbai landlord via NEFT"
 ```
 
-### 4. Interactive Financial Assistant (CLI)
+### 4. Run the Quantitative Evaluation Benchmark
+```bash
+# Rich visual tables across all 4 benchmark suites
+python -m munshi.cli benchmark
+
+# Raw JSON output for CI/CD pipelines
+python -m munshi.cli benchmark --json-out
+```
+
+### 5. Interactive Financial Assistant (CLI)
 ```bash
 python -m munshi.cli chat
 ```
 
-### 5. Generate Financial Reports
+### 6. Generate Financial Statements
 ```bash
 # Trial Balance
 python -m munshi.cli report --type trial_balance
@@ -165,13 +178,45 @@ python -m munshi.cli report --type trial_balance
 # Profit & Loss
 python -m munshi.cli report --type pnl
 
+# Balance Sheet
+python -m munshi.cli report --type balance_sheet
+
 # GSTR-3B Tax Summary
 python -m munshi.cli report --type gst
+
+# Full statutory package
+python -m munshi.cli report --type all
 ```
 
-### 6. Run Test Suite
+### 7. Forensic Audit & Bank Reconciliation
 ```bash
-pytest -v
+# SHA-256 hash-chain verification & regulatory checks
+python -m munshi.cli audit
+
+# Bank statement clearing against invoices
+python -m munshi.cli reconcile
+```
+
+### 8. Interactive Web Dashboard
+```bash
+# Launch local web dashboard (opens in browser)
+python -m munshi.cli web --port 8000
+
+# Or run with Node.js & Vite
+cd frontend && npm install && npm run dev
+```
+
+### 9. Docker Container Deployment
+```bash
+# Build and run with Docker Compose
+docker compose up --build -d
+
+# Open web dashboard at http://localhost:8000/index.html
+```
+
+### 10. Run Full Pytest Suite
+```bash
+pytest -v --cov=munshi
 ```
 
 ---
