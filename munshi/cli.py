@@ -510,13 +510,30 @@ def web_cmd(port: int, no_browser: bool):
     except KeyboardInterrupt:
         console.print("\n[bold yellow]Munshi web server stopped.[/]")
 
+@cli.command(name="serve")
+@click.option("--host", default="0.0.0.0", help="Host interface to bind")
+@click.option("--port", default=8000, help="Port to listen on")
+@click.option("--reload", is_flag=True, help="Enable auto-reload for development")
+def serve_cmd(host: str, port: int, reload: bool):
+    """Start the production FastAPI HTTP REST API server."""
+    try:
+        import uvicorn
+    except ImportError:
+        console.print("[bold red]Error: uvicorn is not installed. Run: pip install uvicorn fastapi[/]")
+        return
+
+    display_banner()
+    console.print(f"[bold green]Starting Munshi FastAPI REST API at:[/] [bold cyan]http://{host}:{port}[/]")
+    console.print(f"[dim]Interactive Swagger UI: http://localhost:{port}/docs | OpenAPI: /openapi.json[/dim]\n")
+    uvicorn.run("munshi.api:app", host=host, port=port, reload=reload)
+
 def main():
     if len(sys.argv) > 1:
         cmd0 = sys.argv[1].lower().strip()
         if cmd0 == "benchmark" and ("--json" in sys.argv or "--json-out" in sys.argv):
             print(json.dumps(run_munshi_benchmark(), indent=2))
             return
-        known_cmds = {"post", "benchmark", "report", "audit", "reconcile", "chat", "web", "--help", "-h"}
+        known_cmds = {"post", "benchmark", "report", "audit", "reconcile", "chat", "web", "serve", "mcp", "--help", "-h"}
         if cmd0 not in known_cmds and not cmd0.startswith("-"):
             # Auto-route direct transaction prompt to post command
             prompt_text = " ".join(sys.argv[1:])
