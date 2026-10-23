@@ -1,18 +1,52 @@
 # munshi/agents/bookkeeper.py
 import re
-from typing import List
+import uuid
+import os
+from typing import List, Optional
 from ..ledger.models import JournalEntry, JournalLine, round_money
-from .gst import GSTAgent
+from ..config import DEFAULT_CONFIG
+from .gst import GSTAgent, GST_REFORM_DATE
 
 class BookkeeperAgent:
-    def __init__(self, home_state_code: str = "27", hitl_threshold: float = 50000.0):
+    def __init__(self, home_state_code: str = "27", hitl_threshold: float = 50000.0, gemini_api_key: Optional[str] = None):
         self.gst_agent = GSTAgent(home_state_code=home_state_code)
         self.hitl_threshold = hitl_threshold
+        self.gemini_api_key = gemini_api_key or DEFAULT_CONFIG.gemini_api_key
         self._seq = 100
+
+    def suggest_account_code_with_gemini(self, description: str) -> Optional[str]:
+        """
+        Optional AI helper that suggests an accounting chart code from narration text only.
+        IMPORTANT: Never passes monetary amounts, invoice dates, or counterparty financials to Gemini.
+        """
+        if not self.gemini_api_key or self.gemini_api_key.startswith("your_"):
+            return None
+        try:
+            from google import genai
+            client = genai.Client(api_key=self.gemini_api_key)
+            prompt = (
+                f"Classify this expense/revenue narration into one Indian Chart of Accounts code "
+                f"(1010=Bank, 1500=Equipment, 4000=Sales, 4100=SaaS/Services, 5100=Rent, 5200=Cloud/Software, "
+                f"5300=Professional/Legal, 5400=Welfare/Food, 5500=Repairs/Supplies, 5600=Travel).\n"
+                f"Narration: '{description}'\n"
+                f"Respond ONLY with the 4-digit account code."
+            )
+            response = client.models.generate_content(
+                model=DEFAULT_CONFIG.model_name,
+                contents=prompt,
+            )
+            text = (response.text or "").strip()
+            code_match = re.search(r"\b(1010|1500|4000|4100|5100|5200|5300|5400|5500|5600)\b", text)
+            if code_match:
+                return code_match.group(1)
+        except Exception:
+            pass
+        return None
 
     def parse_and_create_entry(self, raw_text: str, date: str = "2026-10-16", entry_id: str | None = None) -> JournalEntry:
         self._seq += 1
-        eid = entry_id or f"JE-{self._seq}"
+        # Dynamic UUID-backed sequence prevents collision on same day across runs
+        eid = entry_id or f"JE-{self._seq}-{uuid.uuid4().hex[:4].upper()}"
         lower = raw_text.lower()
 
         lakh_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:lakh|lakhs|lac|lacs)", lower)
@@ -40,8 +74,15 @@ class BookkeeperAgent:
             if candidate and len(candidate) > 2 and candidate.lower() not in ("cash", "neft", "bank", "cheque", "rtgs", "imps", "upi"):
                 party = candidate
 
-        is_inter = any(k in lower for k in ("inter-state", "igst", "bengaluru", "bangalore", "karnataka", "delhi", "gujarat"))
+        # Inter-state detection with full 37 state codes support
+        is_inter = any(k in lower for k in (
+            "inter-state", "igst", "bengaluru", "bangalore", "karnataka", "delhi", "gujarat", 
+            "madhya pradesh", "indore", "bhopal", "hyderabad", "telangana", "chennai", "tamil nadu",
+            "kolkata", "west bengal", "noida", "uttar pradesh", "gurugram", "haryana", "jaipur"
+        ))
         state_code = "29" if is_inter else "27"
+        if "madhya pradesh" in lower or "bhopal" in lower or "indore" in lower:
+            state_code = "23"
 
         gst_rate = 18.0
         if "5%" in lower or "food" in lower or "catering" in lower or "restaurant" in lower:
@@ -52,6 +93,13 @@ class BookkeeperAgent:
             gst_rate = 28.0
         elif "0%" in lower or "exempt" in lower or "capital" in lower or "salary" in lower:
             gst_rate = 0.0
+
+        # Statutory validation: Drop 12% and 28% post 22-Sep-2025
+        if date > GST_REFORM_DATE and gst_rate in (12.0, 28.0):
+            raise ValueError(
+                f"Statutory Error: GST rate {gst_rate:.1f}% was discontinued on {GST_REFORM_DATE}. "
+                f"Voucher dated {date} cannot use {gst_rate:.1f}%."
+            )
 
         is_capital = "capital" in lower and ("promoter" in lower or "owner" in lower or "infusion" in lower)
         is_revenue = any(k in lower for k in ("sold", "sale", "billed", "revenue", "received from client"))
@@ -68,7 +116,7 @@ class BookkeeperAgent:
             return JournalEntry(entry_id=eid, date=date, narration=raw_text, lines=lines, payment_mode="BANK")
 
         category = "food" if is_food else "general"
-        gst_info = self.gst_agent.compute_gst_split(base_amount, gst_rate, state_code, category=category)
+        gst_info = self.gst_agent.compute_gst_split(base_amount, gst_rate, state_code, category=category, invoice_date=date)
         cgst, sgst, igst = gst_info["cgst"], gst_info["sgst"], gst_info["igst"]
         total_gst = gst_info["total_gst"]
 
@@ -113,6 +161,7 @@ class BookkeeperAgent:
             lines.append(JournalLine(pay_code, pay_name, debit=0.0, credit=net_pay))
 
         gross_val = base_amount + total_gst
+        # Strict > threshold: exceeds ₹50,000 requires HITL sign-off
         requires_hitl = (not is_revenue and gross_val > self.hitl_threshold) or (is_cash and gross_val > 10000)
 
         return JournalEntry(
@@ -132,6 +181,11 @@ class BookkeeperAgent:
         )
 
     def categorize_transaction(self, desc: str, counterparty: str = "") -> str:
+        # Check optional Gemini suggestion first
+        suggested = self.suggest_account_code_with_gemini(f"{desc} {counterparty}")
+        if suggested:
+            return suggested
+
         text = f"{desc} {counterparty}".lower()
         if any(k in text for k in ("aws", "cloud", "hosting", "github", "slack", "google workspace", "software", "subscription")):
             return "5200"
@@ -152,4 +206,3 @@ class BookkeeperAgent:
         return "5500"
 
     classify_account = categorize_transaction
-

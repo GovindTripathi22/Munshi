@@ -11,13 +11,18 @@ services:
       - "8000:8000"
     environment:
       - PYTHONIOENCODING=utf-8
+      - MUNSHI_API_KEY=${MUNSHI_API_KEY:-}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - MUNSHI_MODEL=gemini-2.5-flash
+      - COMPANY_NAME=${COMPANY_NAME:-Bharat Tech Solutions Pvt Ltd}
+      - COMPANY_GSTIN=${COMPANY_GSTIN:-27AABCU9603R1ZM}
+      - HOME_STATE_CODE=${HOME_STATE_CODE:-27}
+      - HIGH_VALUE_THRESHOLD=${HIGH_VALUE_THRESHOLD:-50000.0}
     volumes:
       - ./data:/app/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/index.html"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 5s
       retries: 3

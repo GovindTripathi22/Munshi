@@ -75,13 +75,25 @@ class HITLResumeRequest(BaseModel):
 @app.get("/health")
 @app.get("/")
 def health() -> Dict[str, Any]:
+    orch = get_or_create_orchestrator("health")
+    integrity = orch.ledger.verify_ledger_integrity()
+    if not integrity["verified"]:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "status": "unhealthy",
+                "error": "Tamper detected: Ledger cryptographic verification failed",
+                "details": integrity["errors"],
+            },
+        )
     return {
         "status": "healthy",
         "service": "munshi",
         "version": "1.0.0",
+        "database_verified": True,
         "features": [
-            "Double-Entry General Ledger",
-            "Indian GST Sec 49 / 17(5) Rules",
+            "Double-Entry General Ledger with SQLite Persistence",
+            "Indian GST Sec 49 / 17(5) Rules & 2025 Reforms",
             "Bank Statement 3-Factor Reconciliation",
             "Sec 40A(3) & 194C/J Audit Engine",
             "SHA-256 Tamper-Evident Hash Chain",

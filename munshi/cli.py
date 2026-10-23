@@ -527,13 +527,45 @@ def serve_cmd(host: str, port: int, reload: bool):
     console.print(f"[dim]Interactive Swagger UI: http://localhost:{port}/docs | OpenAPI: /openapi.json[/dim]\n")
     uvicorn.run("munshi.api:app", host=host, port=port, reload=reload)
 
+@cli.command(name="verify")
+def verify_cmd():
+    """Verify cryptographic audit trail and ledger database integrity."""
+    from .ledger.engine import LedgerEngine
+    display_banner()
+    engine = LedgerEngine()
+    result = engine.verify_ledger_integrity()
+
+    table = Table(title="Ledger Cryptographic & Database Verification", box=box.ROUNDED)
+    table.add_column("Verification Check", style="bold cyan")
+    table.add_column("Status", justify="center")
+    table.add_column("Details")
+
+    table.add_row(
+        "SHA-256 Hash Chain",
+        "[bold green]PASSED ✓[/]" if result["audit_chain_valid"] else "[bold red]FAILED ✗[/]",
+        f"{result['records_count']} immutable audit records chained",
+    )
+    table.add_row(
+        "Trial Balance Equilibrium",
+        "[bold green]BALANCED ✓[/]" if result["ledger_balanced"] else "[bold red]IMBALANCED ✗[/]",
+        f"Verified across {result['entries_count']} stored entries",
+    )
+    table.add_row(
+        "Database Tamper Check",
+        "[bold green]INTACT ✓[/]" if result["verified"] else "[bold red]TAMPER DETECTED ✗[/]",
+        "Zero unauthorized SQLite row modifications" if result["verified"] else "; ".join(result["errors"]),
+    )
+    console.print(table)
+    if not result["verified"]:
+        sys.exit(1)
+
 def main():
     if len(sys.argv) > 1:
         cmd0 = sys.argv[1].lower().strip()
         if cmd0 == "benchmark" and ("--json" in sys.argv or "--json-out" in sys.argv):
             print(json.dumps(run_munshi_benchmark(), indent=2))
             return
-        known_cmds = {"post", "benchmark", "report", "audit", "reconcile", "chat", "web", "serve", "mcp", "--help", "-h"}
+        known_cmds = {"post", "benchmark", "report", "audit", "reconcile", "chat", "web", "serve", "verify", "mcp", "--help", "-h"}
         if cmd0 not in known_cmds and not cmd0.startswith("-"):
             # Auto-route direct transaction prompt to post command
             prompt_text = " ".join(sys.argv[1:])

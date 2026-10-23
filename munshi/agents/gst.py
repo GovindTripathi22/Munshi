@@ -1,10 +1,14 @@
 # munshi/agents/gst.py
 import re
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional, Tuple
 from ..ledger.models import JournalEntry, round_money
 
 GSTIN_REGEX = re.compile(r"^([0-9]{2})([A-Z]{5}[0-9]{4}[A-Z]{1})([1-9A-Z]{1})Z([0-9A-Z]{1})$")
 
+# Statutory GST Reform Date (Sunsetting 12% & 28% slabs)
+GST_REFORM_DATE = "2025-09-22"
+
+# Complete 37 State/UT codes under Indian GST
 STATE_MAP = {
     "01": "Jammu & Kashmir",
     "02": "Himachal Pradesh",
@@ -31,7 +35,7 @@ STATE_MAP = {
     "23": "Madhya Pradesh",
     "24": "Gujarat",
     "25": "Daman & Diu",
-    "26": "Dadra & Nagar Haveli",
+    "26": "Dadra & Nagar Haveli and Daman & Diu",
     "27": "Maharashtra",
     "28": "Andhra Pradesh (Old)",
     "29": "Karnataka",
@@ -42,9 +46,10 @@ STATE_MAP = {
     "34": "Puducherry",
     "35": "Andaman & Nicobar Islands",
     "36": "Telangana",
-    "37": "Andhra Pradesh",
+    "37": "Andhra Pradesh (New)",
     "38": "Ladakh",
     "97": "Other Territory",
+    "99": "Centre Jurisdiction",
 }
 
 HSN_SLABS = {
@@ -56,15 +61,16 @@ HSN_SLABS = {
     "9964": 5.0,   # Passenger Transport & Cab aggregators
     "8471": 18.0,  # Computers, Servers & Laptops
     "8517": 18.0,  # Smartphones & Telecom Equipment
-    "4820": 12.0,  # Stationery & Registers
+    "4820": 18.0,  # Stationery & Registers (18% post 22-Sep-2025 reform)
     "0401": 0.0,   # Fresh Milk / Exempt Agricultural
 }
 
 class GSTAgent:
     def __init__(self, home_state_code: str = "27"):
-        self.home_state_code = home_state_code
+        self.home_state_code = str(home_state_code).zfill(2)
 
-    def validate_gstin(self, gstin: str) -> Dict[str, Any]:
+    @staticmethod
+    def validate_gstin(gstin: str) -> Dict[str, Any]:
         clean = (gstin or "").strip().upper()
         match = GSTIN_REGEX.match(clean)
         if not match:
@@ -78,14 +84,39 @@ class GSTAgent:
             "pan": match.group(2),
         }
 
+    @staticmethod
+    def validate_gst_rate(rate: float, invoice_date: str = "2026-10-16") -> Tuple[bool, Optional[str]]:
+        """
+        Validate GST rate against statutory rules.
+        Effective 22-Sep-2025, 12% and 28% slabs were dropped/rationalized.
+        """
+        rate = float(rate)
+        if invoice_date > GST_REFORM_DATE:
+            if rate in (12.0, 28.0):
+                return False, (
+                    f"GST rate {rate:.1f}% was rationalized and sunset effective 22-Sep-2025. "
+                    f"Post-reform standard slabs are 0%, 5%, and 18%. Invoices dated after "
+                    f"{GST_REFORM_DATE} cannot use {rate:.1f}%."
+                )
+        valid_slabs = (0.0, 0.25, 3.0, 5.0, 12.0, 18.0, 28.0)
+        if rate not in valid_slabs:
+            return False, f"Invalid statutory GST rate {rate}%. Must be one of {valid_slabs}."
+        return True, None
+
     def compute_gst_split(
         self,
         taxable_amount: float,
         gst_rate: float,
         counterparty_state_code: str = "27",
         category: str = "general",
+        invoice_date: str = "2026-10-16",
     ) -> Dict[str, Any]:
-        is_inter_state = counterparty_state_code != self.home_state_code
+        is_valid, err_msg = self.validate_gst_rate(gst_rate, invoice_date)
+        if not is_valid:
+            raise ValueError(err_msg)
+
+        c_state = str(counterparty_state_code).zfill(2)
+        is_inter_state = c_state != self.home_state_code
         total_gst = round_money(taxable_amount * (gst_rate / 100.0))
         if is_inter_state:
             cgst, sgst, igst = 0.0, 0.0, total_gst

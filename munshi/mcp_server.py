@@ -5,6 +5,9 @@ from .graph import MunshiOrchestrator
 class MunshiMCPServer:
     """
     Model Context Protocol (MCP) Server for AI Agents (Claude Desktop / Cursor / Antigravity).
+    Human-in-the-Loop Governance: MCP AI agents can record and read ledger data,
+    but CANNOT approve high-value transactions. Approvals must be performed by
+    authenticated human operators via CLI or REST API.
     """
     def __init__(self):
         self.orchestrator = MunshiOrchestrator()
@@ -15,8 +18,8 @@ class MunshiMCPServer:
             {"name": "validate_gstin", "description": "Verify 15-character Indian GSTIN format, state code, and PAN"},
             {"name": "compute_gst", "description": "Calculate CGST/SGST vs IGST and check Section 17(5) Blocked ITC"},
             {"name": "get_financial_statements", "description": "Return Trial Balance, P&L, Balance Sheet, and GSTR-3B summary"},
-            {"name": "approve_hitl_entry", "description": "Approve a high-value Pending HITL journal entry"},
             {"name": "verify_audit_chain", "description": "Verify SHA-256 cryptographic hash chain integrity"},
+            {"name": "reconcile_statement", "description": "Reconcile bank statement lines against ledger entries"},
         ]
 
     def call_tool(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -50,6 +53,7 @@ class MunshiMCPServer:
                 float(arguments.get("gst_rate", 18)),
                 arguments.get("state_code", "27"),
                 arguments.get("category", "general"),
+                invoice_date=arguments.get("date", "2026-10-16"),
             )
         elif normalized in ("get_financial_statements", "run_full_close"):
             return self.orchestrator.run_full_close()
@@ -60,8 +64,10 @@ class MunshiMCPServer:
         elif normalized in ("get_gst_summary", "get_gstr3b"):
             return self.orchestrator.gst_agent.generate_gstr3b_summary(self.orchestrator.ledger.entries)
         elif normalized == "approve_hitl_entry":
-            entry = self.orchestrator.ledger.approve_hitl_entry(arguments.get("entry_id", ""))
-            return {"approved": entry is not None, "entry_id": entry.entry_id if entry else None}
+            raise PermissionError(
+                "Access Denied: AI subagents cannot approve high-value transactions via MCP. "
+                "Approvals require human sign-off via CLI ('munshi chat' / '/approve') or authenticated REST API."
+            )
         elif normalized in ("verify_audit_chain", "run_financial_audit"):
             return {
                 "valid": self.orchestrator.ledger.audit_trail.verify_integrity(),
@@ -83,4 +89,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -77,8 +77,18 @@ def main():
         sys.exit(test_ret)
     success("All test suites passed (100% pass rate)!")
 
-    # 4. Ready for Deployment
-    step("[4/4] System is 100% operational and deployment-ready.")
+    # 4. Cryptographic & Database Integrity Check
+    step("[4/5] Running cryptographic hash chain & database tamper verification...")
+    from munshi.ledger.engine import LedgerEngine
+    verifier = LedgerEngine()
+    integ = verifier.verify_ledger_integrity()
+    if not integ["verified"]:
+        print(f"\033[1;31mError: Tamper check failed: {integ['errors']}\033[0m")
+        sys.exit(1)
+    success(f"Tamper check verified: {integ['records_count']} audit records chained, trial balance balanced.")
+
+    # 5. Ready for Deployment
+    step("[5/5] System is 100% operational and deployment-ready.")
     print("\nAvailable Deployment Commands:")
     print("  * FastAPI REST API  : python -m munshi.cli serve --host 0.0.0.0 --port 8000")
     print("  * React Web UI      : python -m munshi.cli web --port 8000")

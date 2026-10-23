@@ -6,7 +6,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONIOENCODING=utf-8 \
     LANG=C.UTF-8 \
-    LC_ALL=C.UTF-8
+    LC_ALL=C.UTF-8 \
+    PORT=8000 \
+    MUNSHI_DB_PATH=/app/data/munshi.db
 
 # Set working directory
 WORKDIR /app
@@ -16,6 +18,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     git \
     && rm -rf /var/lib/apt/lists/*
+
+# Create secure non-root user and group
+RUN groupadd -g 10001 munshi && \
+    useradd -u 10001 -g munshi -s /bin/bash -m munshiuser
 
 # Copy requirements and install python packages
 COPY requirements.txt pyproject.toml ./
@@ -30,15 +36,22 @@ COPY frontend ./frontend
 COPY tests ./tests
 COPY benchmark_results.json EVALUATION_REPORT.md README.md LICENSE ./
 
+# Set permissions for non-root user
+RUN mkdir -p /app/data && \
+    chown -R munshiuser:munshi /app
+
 # Run full pytest suite during image build verification
 RUN pytest -v
 
-# Expose web dashboard port
+# Switch to non-root execution
+USER munshiuser
+
+# Expose web and API port
 EXPOSE 8000
 
-# Health check endpoint
+# Health check verifies ledger integrity and API responsiveness
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8000/index.html || exit 1
+    CMD curl -f http://localhost:8000/health || exit 1
 
-# Default execution: serve interactive web dashboard
-CMD ["python", "-m", "munshi.cli", "web", "--port", "8000", "--no-browser"]
+# Default execution: start production FastAPI REST API & mounted React UI
+CMD ["uvicorn", "munshi.api:app", "--host", "0.0.0.0", "--port", "8000"]
