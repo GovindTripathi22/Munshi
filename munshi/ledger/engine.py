@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 from .models import Account, JournalEntry, JournalLine, round_money
 from .audit_trail import AuditTrail, AuditRecord
-from ..config import DEFAULT_CONFIG
+from ..config import get_config
 
 DEFAULT_CHART: List[Account] = [
     Account("1000", "Cash in Hand", "ASSET"),
@@ -35,18 +35,19 @@ DEFAULT_CHART: List[Account] = [
     Account("5300", "Professional & Legal Fees", "EXPENSE"),
     Account("5400", "Staff Welfare & Blocked ITC Expense", "EXPENSE"),
     Account("5500", "Repairs & Maintenance", "EXPENSE"),
-    Account("5600", "Bank Charges", "EXPENSE"),
+    Account("5600", "Travel & Conveyance Expense", "EXPENSE"),
+    Account("5700", "Bank Charges", "EXPENSE"),
 ]
 
 class LedgerEngine:
     def __init__(self, db_path: Optional[str] = None):
+        cfg = get_config()
         if db_path is not None:
             self.db_path = db_path
-        elif "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST"):
+        elif os.getenv("PYTEST_CURRENT_TEST") or "pytest" in sys.modules:
             self.db_path = ":memory:"
         else:
-            self.db_path = DEFAULT_CONFIG.db_path
-
+            self.db_path = cfg.db_path
         self._lock = threading.RLock()
         self.accounts: Dict[str, Account] = {}
         self.entries: List[JournalEntry] = []
@@ -65,7 +66,6 @@ class LedgerEngine:
                 self._mem_conn = sqlite3.connect(":memory:", check_same_thread=False)
             return self._mem_conn
         
-        # Ensure parent directory exists for file-based SQLite
         db_file = Path(self.db_path)
         db_file.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(db_file), timeout=30.0, check_same_thread=False)
@@ -130,7 +130,6 @@ class LedgerEngine:
             cursor.execute("SELECT code, name, account_type FROM accounts;")
             rows = cursor.fetchall()
             if not rows:
-                # Seed default chart of accounts
                 for acct in DEFAULT_CHART:
                     cursor.execute(
                         "INSERT INTO accounts (code, name, account_type, balance) VALUES (?, ?, ?, 0.0);",
@@ -189,7 +188,6 @@ class LedgerEngine:
 
     def get_account_balance(self, code: str) -> float:
         with self._lock:
-            # Recompute live balance from POSTED entries
             dr_total = sum(l.debit for e in self.entries if e.status == "POSTED" for l in e.lines if l.account_code == code)
             cr_total = sum(l.credit for e in self.entries if e.status == "POSTED" for l in e.lines if l.account_code == code)
             acct = self.accounts.get(code)
@@ -206,12 +204,16 @@ class LedgerEngine:
             conn = self._get_connection()
             cursor = conn.cursor()
             try:
-                # Use IMMEDIATE transaction to acquire write lock before reading audit sequence
                 cursor.execute("BEGIN IMMEDIATE;")
 
-                # Check if entry already exists in DB
+                # Strict Ledger Immutability: duplicate entry IDs are strictly forbidden
                 cursor.execute("SELECT status FROM journal_entries WHERE entry_id = ?;", (entry.entry_id,))
                 existing_row = cursor.fetchone()
+                if existing_row:
+                    raise ValueError(
+                        f"Ledger Immutability Violation: Entry '{entry.entry_id}' has already been recorded in status '{existing_row[0]}'. "
+                        f"Posted journal entries cannot be rewritten or modified."
+                    )
 
                 lines_json = json.dumps([
                     {"account_code": l.account_code, "account_name": l.account_name, "debit": l.debit, "credit": l.credit}
@@ -219,30 +221,16 @@ class LedgerEngine:
                 ])
                 now_ts = datetime.now(timezone.utc).isoformat()
 
-                if existing_row:
-                    cursor.execute("""
-                        UPDATE journal_entries SET
-                            date = ?, narration = ?, party = ?, party_gstin = ?, utr = ?,
-                            payment_mode = ?, status = ?, taxable_value = ?, cgst = ?,
-                            sgst = ?, igst = ?, tds = ?, itc_eligible = ?, lines_json = ?
-                        WHERE entry_id = ?;
-                    """, (
-                        entry.date, entry.narration, entry.party, entry.party_gstin, entry.utr,
-                        entry.payment_mode, entry.status, entry.taxable_value, entry.cgst,
-                        entry.sgst, entry.igst, entry.tds, 1 if entry.itc_eligible else 0,
-                        lines_json, entry.entry_id
-                    ))
-                else:
-                    cursor.execute("""
-                        INSERT INTO journal_entries (
-                            entry_id, date, narration, party, party_gstin, utr, payment_mode, status,
-                            taxable_value, cgst, sgst, igst, tds, itc_eligible, lines_json, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-                    """, (
-                        entry.entry_id, entry.date, entry.narration, entry.party, entry.party_gstin, entry.utr,
-                        entry.payment_mode, entry.status, entry.taxable_value, entry.cgst, entry.sgst, entry.igst,
-                        entry.tds, 1 if entry.itc_eligible else 0, lines_json, now_ts
-                    ))
+                cursor.execute("""
+                    INSERT INTO journal_entries (
+                        entry_id, date, narration, party, party_gstin, utr, payment_mode, status,
+                        taxable_value, cgst, sgst, igst, tds, itc_eligible, lines_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """, (
+                    entry.entry_id, entry.date, entry.narration, entry.party, entry.party_gstin, entry.utr,
+                    entry.payment_mode, entry.status, entry.taxable_value, entry.cgst, entry.sgst, entry.igst,
+                    entry.tds, 1 if entry.itc_eligible else 0, lines_json, now_ts
+                ))
 
                 # Fetch atomic latest audit record for hash-chain continuity
                 cursor.execute("SELECT seq, record_hash FROM audit_records ORDER BY seq DESC LIMIT 1;")
@@ -261,10 +249,11 @@ class LedgerEngine:
                     "total_debit": entry.total_debit,
                     "total_credit": entry.total_credit,
                     "status": entry.status,
-                    "lines": [{"code": l.account_code, "dr": l.debit, "cr": l.credit} for l in entry.lines],
+                    "lines": [{"code": l.account_code, "name": l.account_name, "dr": l.debit, "cr": l.credit} for l in entry.lines],
                 }
                 record_hash = AuditTrail.compute_hash(next_seq, now_ts, action, entry.entry_id, payload, prev_hash)
 
+                # Append-only: Pure INSERT INTO audit_records, never REPLACE
                 cursor.execute("""
                     INSERT INTO audit_records (seq, timestamp, action, entry_id, payload_json, prev_hash, record_hash)
                     VALUES (?, ?, ?, ?, ?, ?, ?);
@@ -284,134 +273,281 @@ class LedgerEngine:
                     record_hash=record_hash,
                 )
                 self.audit_trail.records.append(record)
-
-                # Update in-memory entry list
-                for idx, existing in enumerate(self.entries):
-                    if existing.entry_id == entry.entry_id:
-                        self.entries[idx] = entry
-                        break
-                else:
-                    self.entries.append(entry)
-
+                self.entries.append(entry)
                 return entry
             finally:
                 if self.db_path != ":memory:":
                     conn.close()
 
-    def _persist_entry(self, entry: JournalEntry) -> None:
-        lines_json = json.dumps([
-            {"account_code": l.account_code, "account_name": l.account_name, "debit": l.debit, "credit": l.credit}
-            for l in entry.lines
-        ])
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        now_ts = datetime.now(timezone.utc).isoformat()
-        cursor.execute("""
-            INSERT INTO journal_entries (
-                entry_id, date, narration, party, party_gstin, utr, payment_mode, status,
-                taxable_value, cgst, sgst, igst, tds, itc_eligible, lines_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(entry_id) DO UPDATE SET
-                status=excluded.status,
-                lines_json=excluded.lines_json;
-        """, (
-            entry.entry_id, entry.date, entry.narration, entry.party, entry.party_gstin, entry.utr,
-            entry.payment_mode, entry.status, entry.taxable_value, entry.cgst, entry.sgst, entry.igst,
-            entry.tds, 1 if entry.itc_eligible else 0, lines_json, now_ts
-        ))
-        conn.commit()
-        if self.db_path != ":memory:":
-            conn.close()
-
-    def _persist_audit_record(self, record: AuditRecord) -> None:
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT OR REPLACE INTO audit_records (seq, timestamp, action, entry_id, payload_json, prev_hash, record_hash)
-            VALUES (?, ?, ?, ?, ?, ?, ?);
-        """, (
-            record.seq, record.timestamp, record.action, record.entry_id,
-            json.dumps(record.payload, sort_keys=True), record.prev_hash, record.record_hash
-        ))
-        conn.commit()
-        if self.db_path != ":memory:":
-            conn.close()
-
-    def approve_hitl_entry(self, entry_id: str) -> Optional[JournalEntry]:
+    def approve_hitl_entry(self, entry_id: str, approver: str = "human_approver") -> Optional[JournalEntry]:
         with self._lock:
-            for entry in self.entries:
-                if entry.entry_id == entry_id:
-                    # Strict approval governance: already POSTED or REJECTED entries cannot be re-approved
-                    if entry.status != "PENDING_HITL":
-                        return None
-                    entry.status = "POSTED"
-                    self._persist_entry(entry)
-                    record = self.audit_trail.append(
-                        action="APPROVE_HITL_ENTRY",
-                        entry_id=entry.entry_id,
-                        payload={"entry_id": entry.entry_id, "amount": entry.total_debit, "approved_by": "human_approver"},
-                    )
-                    self._persist_audit_record(record)
-                    return entry
-        return None
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            try:
+                cursor.execute("BEGIN IMMEDIATE;")
+                cursor.execute(
+                    "SELECT date, narration, party, party_gstin, utr, payment_mode, status, taxable_value, cgst, sgst, igst, tds, itc_eligible, lines_json FROM journal_entries WHERE entry_id = ?;",
+                    (entry_id,)
+                )
+                row = cursor.fetchone()
+                if not row or row[6] != "PENDING_HITL":
+                    conn.rollback()
+                    return None
 
-    def reject_hitl_entry(self, entry_id: str, reason: Optional[str] = "Rejected by reviewer") -> Optional[JournalEntry]:
+                # Update status in SQLite
+                cursor.execute("UPDATE journal_entries SET status = 'POSTED' WHERE entry_id = ?;", (entry_id,))
+
+                # Fetch atomic latest audit sequence
+                cursor.execute("SELECT seq, record_hash FROM audit_records ORDER BY seq DESC LIMIT 1;")
+                latest_audit = cursor.fetchone()
+                next_seq = (latest_audit[0] + 1) if latest_audit else 1
+                prev_hash = latest_audit[1] if latest_audit else AuditTrail.GENESIS_HASH
+
+                now_ts = datetime.now(timezone.utc).isoformat()
+                lines_data = json.loads(row[13])
+                tot_dr = sum(float(l["debit"]) for l in lines_data)
+                tot_cr = sum(float(l["credit"]) for l in lines_data)
+                action = "APPROVE_HITL_ENTRY"
+                payload = {
+                    "entry_id": entry_id,
+                    "narration": row[1],
+                    "total_debit": tot_dr,
+                    "total_credit": tot_cr,
+                    "approved_by": approver or "human_approver",
+                    "status": "POSTED",
+                    "lines": [{"code": l["account_code"], "name": l["account_name"], "dr": l["debit"], "cr": l["credit"]} for l in lines_data],
+                }
+                record_hash = AuditTrail.compute_hash(next_seq, now_ts, action, entry_id, payload, prev_hash)
+
+                # Append-only INSERT
+                cursor.execute("""
+                    INSERT INTO audit_records (seq, timestamp, action, entry_id, payload_json, prev_hash, record_hash)
+                    VALUES (?, ?, ?, ?, ?, ?, ?);
+                """, (
+                    next_seq, now_ts, action, entry_id,
+                    json.dumps(payload, sort_keys=True), prev_hash, record_hash
+                ))
+                conn.commit()
+
+                # Update in-memory entry and audit trail
+                rec = AuditRecord(
+                    seq=next_seq, timestamp=now_ts, action=action, entry_id=entry_id,
+                    payload=payload, prev_hash=prev_hash, record_hash=record_hash
+                )
+                self.audit_trail.records.append(rec)
+
+                for e in self.entries:
+                    if e.entry_id == entry_id:
+                        e.status = "POSTED"
+                        return e
+
+                # Reconstruct entry if not found in memory
+                lines = [JournalLine(l["account_code"], l["account_name"], l["debit"], l["credit"]) for l in lines_data]
+                entry = JournalEntry(
+                    entry_id=entry_id, date=row[0], narration=row[1], lines=lines, party=row[2],
+                    party_gstin=row[3], utr=row[4], payment_mode=row[5], status="POSTED",
+                    taxable_value=row[7], cgst=row[8], sgst=row[9], igst=row[10], tds=row[11],
+                    itc_eligible=bool(row[12])
+                )
+                self.entries.append(entry)
+                return entry
+            finally:
+                if self.db_path != ":memory:":
+                    conn.close()
+
+    def reject_hitl_entry(self, entry_id: str, reason: Optional[str] = "Rejected by reviewer", rejector: str = "human_reviewer") -> Optional[JournalEntry]:
         with self._lock:
-            for entry in self.entries:
-                if entry.entry_id == entry_id:
-                    # Strict rejection governance: cannot reject already POSTED entries
-                    if entry.status != "PENDING_HITL":
-                        return None
-                    entry.status = "REJECTED"
-                    self._persist_entry(entry)
-                    record = self.audit_trail.append(
-                        action="HITL_REJECTED",
-                        entry_id=entry.entry_id,
-                        payload={"entry_id": entry.entry_id, "reason": reason or "Rejected by reviewer"},
-                    )
-                    self._persist_audit_record(record)
-                    return entry
-        return None
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            try:
+                cursor.execute("BEGIN IMMEDIATE;")
+                cursor.execute(
+                    "SELECT date, narration, party, party_gstin, utr, payment_mode, status, taxable_value, cgst, sgst, igst, tds, itc_eligible, lines_json FROM journal_entries WHERE entry_id = ?;",
+                    (entry_id,)
+                )
+                row = cursor.fetchone()
+                if not row or row[6] != "PENDING_HITL":
+                    conn.rollback()
+                    return None
+
+                cursor.execute("UPDATE journal_entries SET status = 'REJECTED' WHERE entry_id = ?;", (entry_id,))
+
+                cursor.execute("SELECT seq, record_hash FROM audit_records ORDER BY seq DESC LIMIT 1;")
+                latest_audit = cursor.fetchone()
+                next_seq = (latest_audit[0] + 1) if latest_audit else 1
+                prev_hash = latest_audit[1] if latest_audit else AuditTrail.GENESIS_HASH
+
+                now_ts = datetime.now(timezone.utc).isoformat()
+                lines_data = json.loads(row[13])
+                tot_dr = sum(float(l["debit"]) for l in lines_data)
+                tot_cr = sum(float(l["credit"]) for l in lines_data)
+                action = "HITL_REJECTED"
+                payload = {
+                    "entry_id": entry_id,
+                    "narration": row[1],
+                    "total_debit": tot_dr,
+                    "total_credit": tot_cr,
+                    "status": "REJECTED",
+                    "rejected_by": rejector or "human_reviewer",
+                    "reason": reason or "Rejected by reviewer",
+                }
+                record_hash = AuditTrail.compute_hash(next_seq, now_ts, action, entry_id, payload, prev_hash)
+
+                cursor.execute("""
+                    INSERT INTO audit_records (seq, timestamp, action, entry_id, payload_json, prev_hash, record_hash)
+                    VALUES (?, ?, ?, ?, ?, ?, ?);
+                """, (
+                    next_seq, now_ts, action, entry_id,
+                    json.dumps(payload, sort_keys=True), prev_hash, record_hash
+                ))
+                conn.commit()
+
+                rec = AuditRecord(
+                    seq=next_seq, timestamp=now_ts, action=action, entry_id=entry_id,
+                    payload=payload, prev_hash=prev_hash, record_hash=record_hash
+                )
+                self.audit_trail.records.append(rec)
+
+                for e in self.entries:
+                    if e.entry_id == entry_id:
+                        e.status = "REJECTED"
+                        return e
+
+                lines = [JournalLine(l["account_code"], l["account_name"], l["debit"], l["credit"]) for l in lines_data]
+                entry = JournalEntry(
+                    entry_id=entry_id, date=row[0], narration=row[1], lines=lines, party=row[2],
+                    party_gstin=row[3], utr=row[4], payment_mode=row[5], status="REJECTED",
+                    taxable_value=row[7], cgst=row[8], sgst=row[9], igst=row[10], tds=row[11],
+                    itc_eligible=bool(row[12])
+                )
+                self.entries.append(entry)
+                return entry
+            finally:
+                if self.db_path != ":memory:":
+                    conn.close()
 
     def verify_ledger_integrity(self) -> Dict[str, Any]:
         """
-        Forensic tamper detection:
-        1. Verifies SHA-256 hash chain in audit records.
-        2. Detects direct row tampering or manual edits in SQLite.
-        3. Confirms Trial Balance and Balance Sheet equilibrium.
+        Forensic tamper detection directly against SQLite:
+        1. Reads audit records directly from database and verifies cryptographic SHA-256 chain.
+        2. Compares all database entries line-by-line and amount-by-amount against audit payloads.
+        3. Confirms Trial Balance and Balance Sheet equilibrium across all posted transactions.
         """
         with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
             errors = []
-            chain_valid = self.audit_trail.verify_integrity()
-            if not chain_valid:
-                errors.append("Audit trail SHA-256 hash chain is corrupted or tampered.")
+            chain_valid = True
 
-            # Verify SQLite entry contents match recorded audit payloads
-            entry_map = {e.entry_id: e for e in self.entries}
-            for rec in self.audit_trail.records:
-                if rec.action == "POST_TRANSACTION":
-                    e = entry_map.get(rec.entry_id)
-                    if not e:
-                        errors.append(f"Recorded entry {rec.entry_id} missing from database.")
-                    else:
-                        rec_dr = rec.payload.get("total_debit")
-                        if rec_dr is not None and abs(round_money(rec_dr) - e.total_debit) > 0.01:
+            try:
+                # 1. Verify SHA-256 Audit Trail directly from SQLite
+                cursor.execute("SELECT seq, timestamp, action, entry_id, payload_json, prev_hash, record_hash FROM audit_records ORDER BY seq ASC;")
+                audit_rows = cursor.fetchall()
+
+                db_audit_records: List[AuditRecord] = []
+                prev_expected_hash = AuditTrail.GENESIS_HASH
+
+                for idx, r in enumerate(audit_rows):
+                    seq, ts, action, eid, p_json, p_hash, r_hash = r
+                    payload = json.loads(p_json)
+                    rec = AuditRecord(seq, ts, action, eid, payload, p_hash, r_hash)
+                    db_audit_records.append(rec)
+
+                    if seq != idx + 1:
+                        chain_valid = False
+                        errors.append(f"Audit sequence broken at row {idx+1}: found seq={seq}")
+                    if p_hash != prev_expected_hash:
+                        chain_valid = False
+                        errors.append(f"Hash chain pointer broken at seq {seq}: prev_hash does not match preceding record.")
+
+                    expected_hash = AuditTrail.compute_hash(seq, ts, action, eid, payload, p_hash)
+                    if r_hash != expected_hash:
+                        chain_valid = False
+                        errors.append(f"Cryptographic hash invalid at seq {seq}: record payload has been altered.")
+
+                    prev_expected_hash = r_hash
+
+                # 2. Verify Journal Entries directly from SQLite
+                cursor.execute("SELECT entry_id, date, narration, status, taxable_value, cgst, sgst, igst, tds, lines_json FROM journal_entries;")
+                entry_rows = cursor.fetchall()
+                db_entries_map = {}
+
+                total_posted_dr = 0.0
+                total_posted_cr = 0.0
+
+                for er in entry_rows:
+                    eid, dt, narr, st, tax_v, cg, sg, ig, td, l_json = er
+                    lines_data = json.loads(l_json)
+                    e_dr = round_money(sum(float(l["debit"]) for l in lines_data))
+                    e_cr = round_money(sum(float(l["credit"]) for l in lines_data))
+
+                    if abs(e_dr - e_cr) > 0.01:
+                        errors.append(f"Voucher {eid} in SQLite is unbalanced: Dr={e_dr} != Cr={e_cr}")
+
+                    if st == "POSTED":
+                        total_posted_dr = round_money(total_posted_dr + e_dr)
+                        total_posted_cr = round_money(total_posted_cr + e_cr)
+
+                    db_entries_map[eid] = {
+                        "date": dt,
+                        "narration": narr,
+                        "status": st,
+                        "total_debit": e_dr,
+                        "total_credit": e_cr,
+                        "lines": lines_data,
+                    }
+
+                # 3. Cross-Verify Audit Payloads with Database Entries
+                for rec in db_audit_records:
+                    if rec.action in ("POST_TRANSACTION", "HOLD_PENDING_HITL", "APPROVE_HITL_ENTRY"):
+                        db_entry = db_entries_map.get(rec.entry_id)
+                        if not db_entry:
+                            errors.append(f"Tamper detected: Audit record #{rec.seq} references entry '{rec.entry_id}' missing from SQLite.")
+                            continue
+
+                        audit_dr = rec.payload.get("total_debit")
+                        if audit_dr is not None and abs(round_money(audit_dr) - db_entry["total_debit"]) > 0.01:
                             errors.append(
-                                f"Tamper detected on {rec.entry_id}: DB debit={e.total_debit} != Audit debit={rec_dr}"
+                                f"Tamper detected on entry '{rec.entry_id}': SQLite debit={db_entry['total_debit']} "
+                                f"!= Audit #{rec.seq} ({rec.action}) recorded debit={audit_dr}."
                             )
 
-            tb = self.get_trial_balance()
-            if not tb["is_balanced"]:
-                errors.append(f"Trial balance out of equilibrium: Dr={tb['total_debit']} != Cr={tb['total_credit']}")
+                        # Line-by-line verification: detect account-shifting or debit/credit manipulation
+                        audit_lines = rec.payload.get("lines")
+                        if audit_lines:
+                            db_lines = db_entry["lines"]
+                            if len(audit_lines) != len(db_lines):
+                                errors.append(f"Tamper detected on '{rec.entry_id}': line count modified ({len(db_lines)} != {len(audit_lines)}).")
+                            else:
+                                for a_line, d_line in zip(audit_lines, db_lines):
+                                    if a_line.get("code") != d_line.get("account_code"):
+                                        errors.append(
+                                            f"Tamper detected on '{rec.entry_id}': Account line modified from "
+                                            f"{a_line.get('code')} to {d_line.get('account_code')}."
+                                        )
+                                    if abs(round_money(a_line.get("dr", 0.0)) - round_money(d_line.get("debit", 0.0))) > 0.01:
+                                        errors.append(f"Tamper detected on '{rec.entry_id}': Debit amount changed on account {a_line.get('code')}.")
 
-            return {
-                "verified": len(errors) == 0,
-                "audit_chain_valid": chain_valid,
-                "ledger_balanced": tb["is_balanced"],
-                "records_count": len(self.audit_trail.records),
-                "entries_count": len(self.entries),
-                "errors": errors,
-            }
+                # 4. Check Trial Balance Equilibrium from Database
+                tb_balanced = abs(total_posted_dr - total_posted_cr) < 0.01
+                if not tb_balanced:
+                    errors.append(f"Trial balance out of equilibrium: Total Dr={total_posted_dr} != Total Cr={total_posted_cr}")
+
+                # Refresh in-memory state with freshly verified DB state
+                if not errors:
+                    self.audit_trail = AuditTrail(db_audit_records)
+
+                return {
+                    "verified": len(errors) == 0,
+                    "audit_chain_valid": chain_valid,
+                    "ledger_balanced": tb_balanced,
+                    "records_count": len(db_audit_records),
+                    "entries_count": len(db_entries_map),
+                    "errors": errors,
+                }
+            finally:
+                if self.db_path != ":memory:":
+                    conn.close()
 
     def get_trial_balance(self) -> Dict[str, Any]:
         with self._lock:

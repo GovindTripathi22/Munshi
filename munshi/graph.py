@@ -1,28 +1,37 @@
 # munshi/graph.py
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from langgraph.graph import StateGraph, START, END
 from .ledger.engine import LedgerEngine
 from .ledger.models import BankStatementLine
 from .agents.state import MunshiAgentState
 from .agents.supervisor import SupervisorAgent
 from .agents.bookkeeper import BookkeeperAgent
-from .agents.gst import GSTAgent
+from .agents.gst import GSTAgent, normalize_date
 from .agents.reconciliation import ReconciliationAgent
 from .agents.auditor import AuditorAgent
 from .agents.reporter import ReporterAgent
+from .config import get_config
 
 class MunshiOrchestrator:
     """
     End-to-End LangGraph Multi-Agent Orchestrator:
     Supervisor -> Bookkeeper -> GST -> Auditor -> Reporter
     """
-    def __init__(self, home_state_code: str = "27", hitl_threshold: float = 50000.0):
-        self.ledger = LedgerEngine()
+    def __init__(
+        self,
+        home_state_code: Optional[str] = None,
+        hitl_threshold: Optional[float] = None,
+        ledger: Optional[LedgerEngine] = None,
+    ):
+        cfg = get_config()
+        self.home_state_code = str(home_state_code or cfg.home_state_code).zfill(2)
+        self.hitl_threshold = hitl_threshold if hitl_threshold is not None else cfg.hitl_threshold_inr
+        self.ledger = ledger if ledger is not None else LedgerEngine()
         self.supervisor = SupervisorAgent()
-        self.bookkeeper = BookkeeperAgent(home_state_code=home_state_code, hitl_threshold=hitl_threshold)
-        self.gst_agent = GSTAgent(home_state_code=home_state_code)
+        self.bookkeeper = BookkeeperAgent(home_state_code=self.home_state_code, hitl_threshold=self.hitl_threshold)
+        self.gst_agent = GSTAgent(home_state_code=self.home_state_code)
         self.reconciler = ReconciliationAgent()
-        self.auditor = AuditorAgent(hitl_threshold=hitl_threshold)
+        self.auditor = AuditorAgent(hitl_threshold=self.hitl_threshold, cash_limit=cfg.cash_limit_sec_40a3_inr)
         self.reporter = ReporterAgent()
         self.compiled_graph = self._build_langgraph()
 
@@ -36,7 +45,8 @@ class MunshiOrchestrator:
         def bookkeeper_node(state: MunshiAgentState):
             entry = self.bookkeeper.parse_and_create_entry(
                 state.get("raw_input", ""),
-                date=state.get("date", "2026-10-16"),
+                date=state.get("date"),
+                amount=state.get("amount"),
             )
             self.ledger.post_entry(entry)
             return {
@@ -111,10 +121,18 @@ class MunshiOrchestrator:
 
         return builder.compile()
 
-    def process_transaction(self, raw_text: str, date: str = "2026-10-16", bank_lines: List[BankStatementLine] | None = None) -> Dict[str, Any]:
+    def process_transaction(
+        self,
+        raw_text: str,
+        date: Optional[str] = None,
+        amount: Optional[float] = None,
+        bank_lines: List[BankStatementLine] | None = None,
+    ) -> Dict[str, Any]:
+        norm_date = normalize_date(date)
         initial_state: MunshiAgentState = {
             "raw_input": raw_text,
-            "date": date,
+            "date": norm_date,
+            "amount": amount,
             "bank_lines": bank_lines or [],
             "status": "PROCESSING",
         }
@@ -151,5 +169,13 @@ class MunshiOrchestrator:
             "report_markdown": self.reporter.generate_executive_report(tb, pnl, bs, gstr3b, flags),
         }
 
-def build_munshi_graph(home_state_code: str = "27", hitl_threshold: float = 50000.0) -> MunshiOrchestrator:
-    return MunshiOrchestrator(home_state_code=home_state_code, hitl_threshold=hitl_threshold)
+def build_munshi_graph(
+    home_state_code: Optional[str] = None,
+    hitl_threshold: Optional[float] = None,
+    ledger: Optional[LedgerEngine] = None,
+) -> MunshiOrchestrator:
+    return MunshiOrchestrator(
+        home_state_code=home_state_code,
+        hitl_threshold=hitl_threshold,
+        ledger=ledger,
+    )

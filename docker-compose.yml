@@ -8,10 +8,11 @@ services:
     container_name: munshi-os
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      # Securely bind to loopback interface by default to prevent accidental public exposure
+      - "127.0.0.1:8000:8000"
     environment:
       - PYTHONIOENCODING=utf-8
-      - MUNSHI_API_KEY=${MUNSHI_API_KEY:-}
+      - MUNSHI_API_KEY=${MUNSHI_API_KEY:-munshi-prod-secret-key}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - MUNSHI_MODEL=gemini-2.5-flash

@@ -56,10 +56,10 @@ load_env_file()
 @dataclass
 class MunshiConfig:
     company_name: str = field(
-        default_factory=lambda: os.getenv("COMPANY_NAME", "Munshi Enterprise Technologies Pvt Ltd").strip('"\'')
+        default_factory=lambda: os.getenv("COMPANY_NAME", "Bharat Tech Solutions Pvt Ltd").strip('"\'')
     )
     company_gstin: str = field(
-        default_factory=lambda: os.getenv("COMPANY_GSTIN", "27AABCM1234F1Z5").strip('"\'')
+        default_factory=lambda: os.getenv("COMPANY_GSTIN", "27AABCU9603R1ZM").strip('"\'')
     )
     home_state_code: str = field(
         default_factory=lambda: os.getenv("HOME_STATE_CODE", "27").strip('"\'')
@@ -73,7 +73,10 @@ class MunshiConfig:
     )
     reconciliation_date_window_days: int = 3
     db_path: str = field(
-        default_factory=lambda: os.getenv("MUNSHI_DB_PATH", os.getenv("DATABASE_PATH", str(Path(__file__).resolve().parent.parent / "data" / "munshi.db")))
+        default_factory=lambda: os.getenv(
+            "MUNSHI_DB_PATH",
+            os.getenv("DATABASE_PATH", str(Path.cwd() / "data" / "munshi.db"))
+        )
     )
     api_key: str = field(
         default_factory=lambda: os.getenv("MUNSHI_API_KEY", "")
@@ -92,6 +95,8 @@ class MunshiConfig:
     )
 
 def get_config() -> MunshiConfig:
+    # Re-parse .env to pick up any changes
+    load_env_file()
     return MunshiConfig()
 
 DEFAULT_CONFIG = get_config()

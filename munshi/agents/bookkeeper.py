@@ -4,14 +4,16 @@ import uuid
 import os
 from typing import List, Optional
 from ..ledger.models import JournalEntry, JournalLine, round_money
-from ..config import DEFAULT_CONFIG
-from .gst import GSTAgent, GST_REFORM_DATE
+from ..config import DEFAULT_CONFIG, get_config
+from .gst import GSTAgent, GST_REFORM_DATE, normalize_date
 
 class BookkeeperAgent:
-    def __init__(self, home_state_code: str = "27", hitl_threshold: float = 50000.0, gemini_api_key: Optional[str] = None):
-        self.gst_agent = GSTAgent(home_state_code=home_state_code)
-        self.hitl_threshold = hitl_threshold
-        self.gemini_api_key = gemini_api_key or DEFAULT_CONFIG.gemini_api_key
+    def __init__(self, home_state_code: Optional[str] = None, hitl_threshold: Optional[float] = None, gemini_api_key: Optional[str] = None):
+        cfg = get_config()
+        self.home_state_code = str(home_state_code or cfg.home_state_code).zfill(2)
+        self.hitl_threshold = hitl_threshold if hitl_threshold is not None else cfg.hitl_threshold_inr
+        self.gst_agent = GSTAgent(home_state_code=self.home_state_code)
+        self.gemini_api_key = gemini_api_key or cfg.gemini_api_key
         self._seq = 100
 
     def suggest_account_code_with_gemini(self, description: str) -> Optional[str]:
@@ -32,7 +34,7 @@ class BookkeeperAgent:
                 f"Respond ONLY with the 4-digit account code."
             )
             response = client.models.generate_content(
-                model=DEFAULT_CONFIG.model_name,
+                model=get_config().model_name,
                 contents=prompt,
             )
             text = (response.text or "").strip()
@@ -43,86 +45,121 @@ class BookkeeperAgent:
             pass
         return None
 
-    def parse_and_create_entry(self, raw_text: str, date: str = "2026-10-16", entry_id: str | None = None) -> JournalEntry:
+    def parse_and_create_entry(
+        self,
+        raw_text: str,
+        date: Optional[str] = None,
+        entry_id: Optional[str] = None,
+        amount: Optional[float] = None,
+    ) -> JournalEntry:
         self._seq += 1
-        # Dynamic UUID-backed sequence prevents collision on same day across runs
         eid = entry_id or f"JE-{self._seq}-{uuid.uuid4().hex[:4].upper()}"
+        norm_date = normalize_date(date)
         lower = raw_text.lower()
 
-        lakh_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:lakh|lakhs|lac|lacs)", lower)
-        crore_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:crore|crores|cr)\b", lower)
-        amt_match = re.search(r"(?:₹|rs\.?|inr)\s*([\d,]+(?:\.\d{1,2})?)|(\d[\d,]{2,}(?:\.\d{1,2})?)", raw_text, re.I)
-
-        if crore_match:
-            base_amount = round_money(float(crore_match.group(1)) * 10000000.0)
-        elif lakh_match:
-            base_amount = round_money(float(lakh_match.group(1)) * 100000.0)
-        elif amt_match:
-            raw_amt = (amt_match.group(1) or amt_match.group(2)).replace(",", "")
-            base_amount = round_money(float(raw_amt))
-        else:
+        # 1. Base Amount Extraction
+        if not raw_text or not raw_text.strip():
             base_amount = 10000.0
+        elif amount is not None and float(amount) > 0:
+            base_amount = round_money(float(amount))
+        else:
+            crore_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:crore|crores|cr)\b", lower)
+            lakh_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:lakh|lakhs|lac|lacs)\b", lower)
+            amt_curr = re.search(r"(?:₹|rs\.?|inr)\s*([\d,]+(?:\.\d{1,2})?)", raw_text, re.I)
+            amt_phrase = re.search(r"\b(?:paid|for|of|value|amount|fee|price|billed)\s+(?:of\s+)?(?:₹|rs\.?|inr\s*)?([\d,]+(?:\.\d{1,2})?)\b", raw_text, re.I)
 
-        is_cash = "cash" in lower
+            if crore_match:
+                base_amount = round_money(float(crore_match.group(1)) * 10000000.0)
+            elif lakh_match:
+                base_amount = round_money(float(lakh_match.group(1)) * 100000.0)
+            elif amt_curr:
+                base_amount = round_money(float(amt_curr.group(1).replace(",", "")))
+            elif amt_phrase and amt_phrase.group(1).replace(",", "").replace(".", "").isdigit():
+                base_amount = round_money(float(amt_phrase.group(1).replace(",", "")))
+            else:
+                # Strip order/inv/invoice references before matching standalone numbers
+                stripped = re.sub(r"\b(?:order|inv|invoice|ref|id|#)\s*[:#-]?\s*\d+\b", "", lower)
+                num_match = re.search(r"\b\d+(?:,\d{3})*(?:\.\d{1,2})?\b", stripped)
+                if num_match:
+                    base_amount = round_money(float(num_match.group(0).replace(",", "")))
+                else:
+                    raise ValueError(
+                        f"Could not determine monetary transaction amount from: '{raw_text}'. "
+                        f"Please specify a valid monetary amount."
+                    )
+
+        # 2. Payment Mode (Prevent 'cashback' from triggering cash)
+        is_cash = bool(re.search(r"\bpaid (?:in |by )?cash\b|\bcash payment\b|\bpetty cash\b|\bcash in hand\b", lower)) or (
+            bool(re.search(r"\bcash\b", lower)) and "cashback" not in lower
+        )
         pay_code, pay_name = ("1000", "Cash in Hand") if is_cash else ("1010", "HDFC Bank Current A/c")
 
-        # Extract party/counterparty if present
+        # 3. Counterparty
         party = "General Counterparty"
         party_match = re.search(r"(?:to|from|for|client|vendor|supplier|paid to|billed to)\s+([A-Za-z0-9 &.-]+?)(?:\s+(?:for|via|with|on|in|billed|paid|of|₹|rs\.?|inr|\d)\b|$)", raw_text, re.I)
         if party_match:
             candidate = party_match.group(1).strip()
-            if candidate and len(candidate) > 2 and candidate.lower() not in ("cash", "neft", "bank", "cheque", "rtgs", "imps", "upi"):
+            if candidate and len(candidate) > 2 and candidate.lower() not in ("cash", "neft", "bank", "cheque", "rtgs", "imps", "upi", "cashback"):
                 party = candidate
 
-        # Inter-state detection with full 37 state codes support
+        # 4. State Code / Inter-State Detection
         is_inter = any(k in lower for k in (
             "inter-state", "igst", "bengaluru", "bangalore", "karnataka", "delhi", "gujarat", 
             "madhya pradesh", "indore", "bhopal", "hyderabad", "telangana", "chennai", "tamil nadu",
             "kolkata", "west bengal", "noida", "uttar pradesh", "gurugram", "haryana", "jaipur"
         ))
-        state_code = "29" if is_inter else "27"
+        state_code = "29" if is_inter else self.home_state_code
         if "madhya pradesh" in lower or "bhopal" in lower or "indore" in lower:
             state_code = "23"
 
+        # 5. GST Rate Detection
+        is_promoter_capital = any(k in lower for k in ("promoter capital", "capital infusion", "owner capital", "equity capital", "capital introduced"))
         gst_rate = 18.0
-        if "5%" in lower or "food" in lower or "catering" in lower or "restaurant" in lower:
-            gst_rate = 5.0
-        elif "12%" in lower:
-            gst_rate = 12.0
-        elif "28%" in lower:
+        if re.search(r"\b40\s*%", lower):
+            gst_rate = 40.0
+        elif re.search(r"\b28\s*%", lower):
             gst_rate = 28.0
-        elif "0%" in lower or "exempt" in lower or "capital" in lower or "salary" in lower:
+        elif re.search(r"\b12\s*%", lower):
+            gst_rate = 12.0
+        elif re.search(r"\b5\s*%", lower) or any(k in lower for k in ("food", "catering", "restaurant", "lunch", "dinner")):
+            gst_rate = 5.0
+        elif re.search(r"\b0\s*%", lower) or any(k in lower for k in ("exempt", "nil rated", "salary")) or is_promoter_capital:
             gst_rate = 0.0
 
-        # Statutory validation: Drop 12% and 28% post 22-Sep-2025
-        if date > GST_REFORM_DATE and gst_rate in (12.0, 28.0):
+        # Statutory Validation: Disallow 12% and 28% post 22-Sep-2025
+        if norm_date >= GST_REFORM_DATE and gst_rate in (12.0, 28.0):
             raise ValueError(
-                f"Statutory Error: GST rate {gst_rate:.1f}% was discontinued on {GST_REFORM_DATE}. "
-                f"Voucher dated {date} cannot use {gst_rate:.1f}%."
+                f"Statutory Error: GST rate {gst_rate:.1f}% was discontinued on 2025-09-22 (effective 22-Sep-2025). "
+                f"Voucher dated {norm_date} cannot use {gst_rate:.1f}%."
             )
 
-        is_capital = "capital" in lower and ("promoter" in lower or "owner" in lower or "infusion" in lower)
-        is_revenue = any(k in lower for k in ("sold", "sale", "billed", "revenue", "received from client"))
-        is_rent = "rent" in lower
-        is_prof = any(k in lower for k in ("legal", "professional", "consultant", "audit fee"))
+        # 6. Intent & Category Classification
+        is_travel = any(k in lower for k in ("flight", "ticket", "hotel", "travel", "conveyance", "conference", "cab", "taxi", "uber", "ola", "train"))
+        is_revenue = not is_travel and bool(re.search(r"\b(sold|sale|sales|billed|revenue|invoiced|client billing)\b", lower))
+        is_rent = bool(re.search(r"\brent\b", lower))
+        is_prof = any(k in lower for k in ("legal", "professional", "consultant", "audit fee", "technical service"))
         is_food = any(k in lower for k in ("food", "catering", "restaurant", "dinner", "lunch"))
-        is_equip = any(k in lower for k in ("laptop", "macbook", "computer", "equipment"))
+        is_equip = any(k in lower for k in ("laptop", "macbook", "computer", "equipment", "capital equipment", "capital goods"))
 
-        if is_capital:
+        if is_promoter_capital:
             lines = [
                 JournalLine(pay_code, pay_name, debit=base_amount, credit=0.0),
                 JournalLine("3000", "Owner Capital Account", debit=0.0, credit=base_amount),
             ]
-            return JournalEntry(entry_id=eid, date=date, narration=raw_text, lines=lines, payment_mode="BANK")
+            return JournalEntry(entry_id=eid, date=norm_date, narration=raw_text, lines=lines, payment_mode="BANK")
 
         category = "food" if is_food else "general"
-        gst_info = self.gst_agent.compute_gst_split(base_amount, gst_rate, state_code, category=category, invoice_date=date)
+        gst_info = self.gst_agent.compute_gst_split(base_amount, gst_rate, state_code, category=category, invoice_date=norm_date)
         cgst, sgst, igst = gst_info["cgst"], gst_info["sgst"], gst_info["igst"]
         total_gst = gst_info["total_gst"]
 
+        # TDS Withholding: Section 194-I (Rent > ₹20,000/mo) & Section 194J (Professional > ₹50,000)
         tds = 0.0
-        if not is_revenue and (is_rent or is_prof) and base_amount >= 20000:
-            tds = round_money(base_amount * 0.10)
+        if not is_revenue:
+            if is_rent and base_amount > 20000.0:
+                tds = round_money(base_amount * 0.10)
+            elif is_prof and base_amount > 50000.0:
+                tds = round_money(base_amount * 0.10)
 
         lines: List[JournalLine] = []
         if is_revenue:
@@ -146,7 +183,9 @@ class BookkeeperAgent:
                 exp_code, exp_name = ("5300", "Professional & Legal Fees")
             elif is_equip:
                 exp_code, exp_name = ("1500", "Computer & Office Equipment")
-            elif "cloud" in lower or "aws" in lower or "software" in lower:
+            elif is_travel:
+                exp_code, exp_name = ("5600", "Travel & Conveyance Expense")
+            elif "cloud" in lower or "aws" in lower or "software" in lower or "hosting" in lower:
                 exp_code, exp_name = ("5200", "Cloud & Software Subscriptions")
 
             lines.append(JournalLine(exp_code, exp_name, debit=base_amount, credit=0.0))
@@ -162,11 +201,11 @@ class BookkeeperAgent:
 
         gross_val = base_amount + total_gst
         # Strict > threshold: exceeds ₹50,000 requires HITL sign-off
-        requires_hitl = (not is_revenue and gross_val > self.hitl_threshold) or (is_cash and gross_val > 10000)
+        requires_hitl = (not is_revenue and gross_val > self.hitl_threshold) or (is_cash and gross_val > 10000.0)
 
         return JournalEntry(
             entry_id=eid,
-            date=date,
+            date=norm_date,
             narration=raw_text,
             lines=lines,
             party=party,
@@ -181,7 +220,6 @@ class BookkeeperAgent:
         )
 
     def categorize_transaction(self, desc: str, counterparty: str = "") -> str:
-        # Check optional Gemini suggestion first
         suggested = self.suggest_account_code_with_gemini(f"{desc} {counterparty}")
         if suggested:
             return suggested

@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import os
 import uuid
+import threading
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,9 +19,12 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
+from munshi.config import get_config
+from munshi.ledger.engine import LedgerEngine
 from munshi.graph import MunshiOrchestrator, build_munshi_graph
 from munshi.ledger.models import BankStatementLine
 from munshi.evaluation.benchmark import run_munshi_benchmark
+from munshi.agents.gst import normalize_date
 
 app = FastAPI(
     title="Munshi API",
@@ -27,30 +32,52 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# Enable CORS for external frontends and dashboards
+# Secure CORS: disallow wildcard credential reflection
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Global in-memory orchestrator sessions keyed by thread_id
+# Shared Singleton Ledger Engine to guarantee database consistency and prevent memory leaks
+_SHARED_ENGINE: Optional[LedgerEngine] = None
+_ENGINE_LOCK = threading.Lock()
+
+def get_shared_engine() -> LedgerEngine:
+    global _SHARED_ENGINE
+    with _ENGINE_LOCK:
+        if _SHARED_ENGINE is None:
+            cfg = get_config()
+            _SHARED_ENGINE = LedgerEngine(db_path=cfg.db_path)
+        return _SHARED_ENGINE
+
 _SESSIONS: Dict[str, MunshiOrchestrator] = {}
+_SESSIONS_LOCK = threading.Lock()
 
 def get_or_create_orchestrator(thread_id: str = "default") -> MunshiOrchestrator:
-    if thread_id not in _SESSIONS:
-        _SESSIONS[thread_id] = build_munshi_graph()
-    return _SESSIONS[thread_id]
+    with _SESSIONS_LOCK:
+        if thread_id not in _SESSIONS:
+            cfg = get_config()
+            _SESSIONS[thread_id] = build_munshi_graph(
+                home_state_code=cfg.home_state_code,
+                hitl_threshold=cfg.hitl_threshold_inr,
+                ledger=get_shared_engine(),
+            )
+        return _SESSIONS[thread_id]
 
-def verify_api_key(x_api_key: Optional[str] = Header(default=None)) -> None:
-    expected = os.getenv("MUNSHI_API_KEY", "")
-    if expected and x_api_key != expected:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or missing X-API-Key header",
-        )
+def verify_api_key(x_api_key: Optional[str] = Header(default=None, alias="X-API-Key")) -> str:
+    cfg = get_config()
+    expected = cfg.api_key
+    if expected:
+        if not x_api_key or x_api_key.strip() != expected.strip():
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Unauthorized: Invalid or missing X-API-Key header",
+            )
+        return x_api_key
+    return "anonymous"
 
 # ---------------------------------------------------------
 # Request & Response Schemas
@@ -59,7 +86,8 @@ class WorkflowRequest(BaseModel):
     thread_id: Optional[str] = None
     prompt: Optional[str] = Field(default=None, description="Natural language transaction prompt")
     raw_input: Optional[str] = None
-    date: Optional[str] = "2026-10-16"
+    date: Optional[str] = None
+    amount: Optional[float] = None
     transactions: Optional[List[Dict[str, Any]]] = None
     bank_statement: Optional[List[Dict[str, Any]]] = None
     hitl_approved: Optional[bool] = None
@@ -75,8 +103,8 @@ class HITLResumeRequest(BaseModel):
 @app.get("/health")
 @app.get("/")
 def health() -> Dict[str, Any]:
-    orch = get_or_create_orchestrator("health")
-    integrity = orch.ledger.verify_ledger_integrity()
+    engine = get_shared_engine()
+    integrity = engine.verify_ledger_integrity()
     if not integrity["verified"]:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -105,6 +133,7 @@ def health() -> Dict[str, Any]:
 def run_workflow(req: WorkflowRequest) -> Dict[str, Any]:
     thread_id = req.thread_id or str(uuid.uuid4())
     orch = get_or_create_orchestrator(thread_id)
+    req_date = normalize_date(req.date)
 
     bank_lines = []
     if req.bank_statement:
@@ -116,7 +145,7 @@ def run_workflow(req: WorkflowRequest) -> Dict[str, Any]:
             bank_lines.append(
                 BankStatementLine(
                     line_id=str(row.get("tx_id", f"BNK-{idx+1:03d}")),
-                    date=str(row.get("date", req.date or "2026-10-16")),
+                    date=str(row.get("date", req_date)),
                     description=str(row.get("description", "Bank Transaction")),
                     debit=dr,
                     credit=cr,
@@ -126,19 +155,19 @@ def run_workflow(req: WorkflowRequest) -> Dict[str, Any]:
 
     text_input = req.prompt or req.raw_input
     if text_input:
-        res = orch.process_transaction(text_input, date=req.date or "2026-10-16", bank_lines=bank_lines)
+        res = orch.process_transaction(text_input, date=req_date, amount=req.amount, bank_lines=bank_lines)
     elif req.transactions:
-        # Process list of structured or unstructured transactions
         last_res = {}
         for tx in req.transactions:
-            if isinstance(tx, dict) and "description" in tx and "amount" in tx:
-                prompt_line = f"{tx.get('description')} for INR {tx.get('amount')}"
+            if isinstance(tx, dict):
+                tx_desc = tx.get("description") or str(tx)
+                tx_amt = float(tx.get("amount")) if tx.get("amount") is not None else None
+                tx_date = tx.get("date", req_date)
+                last_res = orch.process_transaction(tx_desc, date=tx_date, amount=tx_amt, bank_lines=bank_lines)
             else:
-                prompt_line = str(tx)
-            last_res = orch.process_transaction(prompt_line, date=req.date or "2026-10-16", bank_lines=bank_lines)
+                last_res = orch.process_transaction(str(tx), date=req_date, bank_lines=bank_lines)
         res = last_res
     else:
-        # Full reporting close
         close_res = orch.run_full_close(bank_lines=bank_lines)
         return {
             "thread_id": thread_id,
@@ -171,11 +200,14 @@ def run_workflow(req: WorkflowRequest) -> Dict[str, Any]:
     }
 
 @app.post("/v1/workflows/{thread_id}/hitl", dependencies=[Depends(verify_api_key)])
-def resume_hitl(thread_id: str, decision: HITLResumeRequest) -> Dict[str, Any]:
+def resume_hitl(
+    thread_id: str,
+    decision: HITLResumeRequest,
+    caller_key: str = Depends(verify_api_key),
+) -> Dict[str, Any]:
     orch = get_or_create_orchestrator(thread_id)
     entry_id = decision.entry_id
 
-    # If no specific entry_id supplied, find first pending voucher
     if not entry_id:
         pending = [e for e in orch.ledger.entries if e.status == "PENDING_HITL"]
         if pending:
@@ -184,10 +216,15 @@ def resume_hitl(thread_id: str, decision: HITLResumeRequest) -> Dict[str, Any]:
     if not entry_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No pending HITL voucher found.")
 
+    approver_name = f"user_{caller_key[:8]}" if caller_key != "anonymous" else "human_reviewer"
+
     if decision.approved:
-        approved_entry = orch.ledger.approve_hitl_entry(entry_id)
+        approved_entry = orch.ledger.approve_hitl_entry(entry_id, approver=approver_name)
         if not approved_entry:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Failed to approve voucher {entry_id}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cannot approve voucher {entry_id}: entry not found or not in PENDING_HITL status."
+            )
         return {
             "thread_id": thread_id,
             "entry_id": entry_id,
@@ -197,38 +234,46 @@ def resume_hitl(thread_id: str, decision: HITLResumeRequest) -> Dict[str, Any]:
             "trial_balance": orch.ledger.get_trial_balance(),
         }
     else:
-        # Mark as rejected
-        for e in orch.ledger.entries:
-            if e.entry_id == entry_id:
-                e.status = "REJECTED"
+        rejected_entry = orch.ledger.reject_hitl_entry(
+            entry_id,
+            reason=decision.reviewer_notes or "Rejected by reviewer",
+            rejector=approver_name,
+        )
+        if not rejected_entry:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cannot reject voucher {entry_id}: entry not found or not in PENDING_HITL status."
+            )
         return {
             "thread_id": thread_id,
             "entry_id": entry_id,
             "status": "REJECTED",
+            "entry": asdict(rejected_entry),
             "reviewer_notes": decision.reviewer_notes,
+            "trial_balance": orch.ledger.get_trial_balance(),
         }
 
-@app.get("/v1/ledger/trial-balance")
+@app.get("/v1/ledger/trial-balance", dependencies=[Depends(verify_api_key)])
 def get_trial_balance(thread_id: str = "default") -> Dict[str, Any]:
     orch = get_or_create_orchestrator(thread_id)
     return orch.ledger.get_trial_balance()
 
-@app.get("/v1/ledger/pnl")
+@app.get("/v1/ledger/pnl", dependencies=[Depends(verify_api_key)])
 def get_pnl(thread_id: str = "default") -> Dict[str, Any]:
     orch = get_or_create_orchestrator(thread_id)
     return orch.ledger.get_profit_and_loss()
 
-@app.get("/v1/ledger/balance-sheet")
+@app.get("/v1/ledger/balance-sheet", dependencies=[Depends(verify_api_key)])
 def get_balance_sheet(thread_id: str = "default") -> Dict[str, Any]:
     orch = get_or_create_orchestrator(thread_id)
     return orch.ledger.get_balance_sheet()
 
-@app.get("/v1/gst/gstr3b")
+@app.get("/v1/gst/gstr3b", dependencies=[Depends(verify_api_key)])
 def get_gstr3b(thread_id: str = "default") -> Dict[str, Any]:
     orch = get_or_create_orchestrator(thread_id)
     return orch.gst_agent.generate_gstr3b_summary(orch.ledger.entries)
 
-@app.get("/v1/audit/findings")
+@app.get("/v1/audit/findings", dependencies=[Depends(verify_api_key)])
 def get_audit_findings(thread_id: str = "default") -> Dict[str, Any]:
     orch = get_or_create_orchestrator(thread_id)
     flags = orch.auditor.audit_entries(orch.ledger.entries, orch.ledger.audit_trail)
@@ -238,19 +283,23 @@ def get_audit_findings(thread_id: str = "default") -> Dict[str, Any]:
         "flags": [asdict(f) for f in flags],
     }
 
-@app.get("/v1/benchmark")
+@app.get("/v1/benchmark", dependencies=[Depends(verify_api_key)])
 def run_benchmark_endpoint() -> Dict[str, Any]:
     return run_munshi_benchmark()
 
+# ---------------------------------------------------------
+# Web UI & Static Frontend Routes
+# ---------------------------------------------------------
+frontend_dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+
+@app.get("/index.html")
 @app.get("/ui")
 @app.get("/app")
 def get_dashboard_ui():
     index_file = frontend_dist / "index.html"
     if index_file.exists():
         return FileResponse(str(index_file))
-    return {"message": "Frontend not yet built. Static build located in frontend/dist/"}
+    return {"message": "Munshi API active. Frontend static build located at frontend/dist/"}
 
-# Static Files: Mount pre-built React frontend if dist/ exists
-frontend_dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 if frontend_dist.exists() and (frontend_dist / "index.html").exists():
     app.mount("/dashboard", StaticFiles(directory=str(frontend_dist), html=True), name="dashboard")

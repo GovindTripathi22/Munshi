@@ -5,6 +5,7 @@ from ..ledger.models import JournalEntry, AuditFlag, BankStatementLine
 class MunshiAgentState(TypedDict, total=False):
     raw_input: str
     date: str
+    amount: Optional[float]
     intent: str
     entry: Optional[JournalEntry]
     bank_lines: List[BankStatementLine]

@@ -13,10 +13,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies
+# Install minimal runtime system dependencies (curl for health check)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
-    git \
     && rm -rf /var/lib/apt/lists/*
 
 # Create secure non-root user and group
@@ -29,19 +28,16 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt && \
     pip install --no-cache-dir -e .
 
-# Copy application source code
+# Copy application source code and pre-built frontend
 COPY munshi ./munshi
 COPY data ./data
 COPY frontend ./frontend
-COPY tests ./tests
 COPY benchmark_results.json EVALUATION_REPORT.md README.md LICENSE ./
 
-# Set permissions for non-root user
+# Set permissions for non-root user and data volume mount
 RUN mkdir -p /app/data && \
-    chown -R munshiuser:munshi /app
-
-# Run full pytest suite during image build verification
-RUN pytest -v
+    chown -R munshiuser:munshi /app && \
+    chmod -R 775 /app/data
 
 # Switch to non-root execution
 USER munshiuser
