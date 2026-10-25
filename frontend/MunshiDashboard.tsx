@@ -15,7 +15,7 @@ import {
   backendEntryToFrontend,
   getStoredApiKey,
   setStoredApiKey
-} from './api';
+} from './munshiApi';
 
 /**
  * ============================================================================

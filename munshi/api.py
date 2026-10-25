@@ -310,5 +310,9 @@ def get_dashboard_ui():
         return FileResponse(str(index_file))
     return {"message": "Munshi API active. Frontend static build located at frontend/dist/"}
 
-if frontend_dist.exists() and (frontend_dist / "index.html").exists():
-    app.mount("/dashboard", StaticFiles(directory=str(frontend_dist), html=True), name="dashboard")
+if frontend_dist.exists():
+    assets_dir = frontend_dist / "assets"
+    if assets_dir.exists():
+        app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+    if (frontend_dist / "index.html").exists():
+        app.mount("/dashboard", StaticFiles(directory=str(frontend_dist), html=True), name="dashboard")
