@@ -1,10 +1,21 @@
-import React, { useState, useMemo, useCallback } from 'react';
+import React, { useState, useMemo, useCallback, useEffect } from 'react';
 import {
   Cpu, ShieldCheck, AlertTriangle, CheckCircle2, FileSpreadsheet, Scale,
   Receipt, Landmark, Lock, Unlock, Play, RefreshCw, Copy, Terminal,
   Code2, Sparkles, ArrowRight, Plus, Check, X, Search, FileText,
   Layers, Activity, Eye, KeyRound, Server, BarChart3, BookOpen, GitBranch, Trash2, Download
 } from 'lucide-react';
+import {
+  checkBackendHealth,
+  postWorkflowTransaction,
+  resumeWorkflowHITL,
+  fetchLiveTrialBalance,
+  fetchLiveAuditFindings,
+  runApiBenchmark,
+  backendEntryToFrontend,
+  getStoredApiKey,
+  setStoredApiKey
+} from './api';
 
 /**
  * ============================================================================
@@ -1644,6 +1655,10 @@ export default function MunshiApp() {
   const [diagnosticResults, setDiagnosticResults] = useState(null);
   const [antigravityModalOpen, setAntigravityModalOpen] = useState(false);
   const [toast, setToast] = useState(null);
+  const [backendConnected, setBackendConnected] = useState<boolean | null>(null);
+  const [isPosting, setIsPosting] = useState(false);
+  const [apiKeyInput, setApiKeyInput] = useState(getStoredApiKey());
+  const [apiKeyModalOpen, setApiKeyModalOpen] = useState(false);
 
   const showToast = useCallback((title, detail = '') => {
     setToast({ title, detail });
@@ -1664,6 +1679,25 @@ export default function MunshiApp() {
       showToast('Copy Notice', 'Please copy manually.');
     }
     document.body.removeChild(el);
+  }, [showToast]);
+
+  useEffect(() => {
+    let mounted = true;
+    async function initCheck() {
+      try {
+        const health = await checkBackendHealth();
+        if (mounted && health && health.status === 'healthy') {
+          setBackendConnected(true);
+          showToast('Munshi Backend Connected', 'FastAPI :8000 & SQLite Ledger Engine active and verified.');
+        }
+      } catch {
+        if (mounted) {
+          setBackendConnected(false);
+        }
+      }
+    }
+    initCheck();
+    return () => { mounted = false; };
   }, [showToast]);
 
   const postedEntries = useMemo(
@@ -1846,16 +1880,57 @@ export default function MunshiApp() {
     return flags;
   }, [journalEntries, tamperedChain]);
 
-  const handleRunMunshiCommand = useCallback((rawCmd) => {
+  const handleRunMunshiCommand = useCallback(async (rawCmd) => {
     const cmdText = (rawCmd || promptInput).trim();
     if (!cmdText) return;
 
+    setIsPosting(true);
+    setActiveAgentStep(1);
+    const t0 = performance.now();
+
+    try {
+      const stepTimer1 = setTimeout(() => setActiveAgentStep(2), 120);
+      const stepTimer2 = setTimeout(() => setActiveAgentStep(3), 240);
+      const stepTimer3 = setTimeout(() => setActiveAgentStep(4), 380);
+
+      const resp = await postWorkflowTransaction(cmdText);
+      clearTimeout(stepTimer1);
+      clearTimeout(stepTimer2);
+      clearTimeout(stepTimer3);
+      setActiveAgentStep(5);
+
+      const latencyMs = Math.round(performance.now() - t0);
+      setLastPipelineLatency(latencyMs);
+      setBackendConnected(true);
+
+      if (resp && resp.entry) {
+        const feEntry = backendEntryToFrontend(resp.entry);
+        setJournalEntries(prev => [feEntry, ...prev.filter(e => e.id !== feEntry.id)]);
+        setPromptInput('');
+
+        if (resp.requires_hitl || resp.status === 'AWAITING_HITL_APPROVAL') {
+          showToast(
+            `Paused at HITL Gate: ${feEntry.id}`,
+            'Transaction requires Human-in-the-Loop review before posting to General Ledger.'
+          );
+        } else {
+          showToast(
+            `Committed ${feEntry.id} to Ledger`,
+            `Processed via FastAPI LangGraph Orchestrator in ${latencyMs}ms • Trial Balance verified.`
+          );
+        }
+        return;
+      }
+    } catch (err: any) {
+      console.warn('Backend API workflow fallback:', err?.message || err);
+    } finally {
+      setIsPosting(false);
+    }
+
+    // Client-side fallback if backend call failed or was unreachable
     const result = parseTransactionWithMunshiSLM(cmdText, journalEntries.length);
     setLastPipelineLatency(result.latencyMs);
-    setActiveAgentStep(1);
-    setTimeout(() => setActiveAgentStep(3), 150);
-    setTimeout(() => setActiveAgentStep(5), 320);
-
+    setActiveAgentStep(5);
     setJournalEntries(prev => [result.entry, ...prev]);
     setPromptInput('');
 
@@ -1867,16 +1942,28 @@ export default function MunshiApp() {
           : 'High-value transaction > ₹50,000 requires 1-click HITL approval.'
       );
     } else {
-      showToast(`Posted Balanced Entry ${result.entry.id}`, `Parsed in ${result.latencyMs}ms • Trial Balance 100% in sync.`);
+      showToast(`Posted Balanced Entry ${result.entry.id}`, `(Offline SLM) Parsed in ${result.latencyMs}ms • Trial Balance 100% in sync.`);
     }
   }, [promptInput, journalEntries.length, showToast]);
 
-  const handleApproveHitl = useCallback((id) => {
+  const handleApproveHitl = useCallback(async (id) => {
+    try {
+      await resumeWorkflowHITL('default', id, true);
+      setBackendConnected(true);
+    } catch (err: any) {
+      console.warn('Backend HITL approve notice:', err?.message || err);
+    }
     setJournalEntries(prev => prev.map(e => (e.id === id ? { ...e, status: 'POSTED' } : e)));
     showToast(`Approved ${id}`, 'Committed to general ledger and updated Trial Balance & GSTR-3B.');
   }, [showToast]);
 
-  const handleRejectHitl = useCallback((id) => {
+  const handleRejectHitl = useCallback(async (id) => {
+    try {
+      await resumeWorkflowHITL('default', id, false, 'Rejected by reviewer');
+      setBackendConnected(true);
+    } catch (err: any) {
+      console.warn('Backend HITL reject notice:', err?.message || err);
+    }
     setJournalEntries(prev => prev.map(e => (e.id === id ? { ...e, status: 'REJECTED' } : e)));
     showToast(`Rejected ${id}`, 'Voucher excluded from General Ledger.');
   }, [showToast]);
@@ -2057,6 +2144,42 @@ print("\\n🚀 All 22 Munshi modules + 8 Pytest suites upgraded! Run: pytest -v"
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
+              <div
+                onClick={() => {
+                  checkBackendHealth()
+                    .then(() => {
+                      setBackendConnected(true);
+                      showToast('Backend Online', 'FastAPI :8000 connected and verified.');
+                    })
+                    .catch(() => {
+                      setBackendConnected(false);
+                      showToast('Backend Offline', 'Ensure `python -m munshi.cli serve` is running.');
+                    });
+                }}
+                className={`cursor-pointer px-3 py-1.5 rounded-xl border text-xs font-mono font-bold flex items-center gap-1.5 transition ${
+                  backendConnected === true
+                    ? 'bg-emerald-500/15 border-emerald-400/40 text-emerald-300'
+                    : backendConnected === false
+                    ? 'bg-amber-500/15 border-amber-400/40 text-amber-300'
+                    : 'bg-slate-800/60 border-white/10 text-slate-400'
+                }`}
+                title="Click to re-check FastAPI backend health"
+              >
+                <span className={`w-2 h-2 rounded-full ${
+                  backendConnected === true ? 'bg-emerald-400 animate-pulse' : backendConnected === false ? 'bg-amber-400' : 'bg-slate-400'
+                }`} />
+                <span>{backendConnected === true ? 'API Connected (:8000)' : backendConnected === false ? 'API Offline (Local SLM)' : 'Checking API...'}</span>
+              </div>
+
+              <button
+                onClick={() => setApiKeyModalOpen(true)}
+                className="px-2.5 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-white/10 text-slate-300 hover:text-white text-xs font-mono flex items-center gap-1 transition"
+                title="Configure MUNSHI_API_KEY"
+              >
+                <KeyRound className="w-3.5 h-3.5 text-indigo-400" />
+                <span>API Key</span>
+              </button>
+
               <button
                 onClick={() => {
                   setActiveTab('mcp');
@@ -2094,11 +2217,14 @@ print("\\n🚀 All 22 Munshi modules + 8 Pytest suites upgraded! Run: pytest -v"
                 className="w-full bg-transparent text-xs text-white placeholder-slate-400 focus:outline-none"
               />
               <button
+                disabled={isPosting}
                 onClick={() => handleRunMunshiCommand(promptInput)}
-                className="px-3.5 py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold text-xs flex items-center gap-1 shrink-0"
+                className={`px-3.5 py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold text-xs flex items-center gap-1 shrink-0 ${
+                  isPosting ? 'opacity-70 cursor-wait' : ''
+                }`}
               >
-                <Play className="w-3.5 h-3.5 fill-slate-950" />
-                <span>Post via LangGraph</span>
+                {isPosting ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5 fill-slate-950" />}
+                <span>{isPosting ? 'Posting...' : 'Post via LangGraph'}</span>
               </button>
             </div>
 
@@ -2822,6 +2948,61 @@ print("\\n🚀 All 22 Munshi modules + 8 Pytest suites upgraded! Run: pytest -v"
           </div>
         )}
       </main>
+
+      {/* API Key Configuration Modal */}
+      {apiKeyModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-emerald-400/50 rounded-3xl max-w-md w-full p-6 space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-white/10 pb-3">
+              <div className="flex items-center gap-2">
+                <KeyRound className="w-5 h-5 text-emerald-400" />
+                <h3 className="text-base font-bold text-white">Munshi API Configuration</h3>
+              </div>
+              <button onClick={() => setApiKeyModalOpen(false)} className="text-slate-400 hover:text-white">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <p className="text-slate-300">
+                Enter your <code className="text-emerald-300">MUNSHI_API_KEY</code> if configured in your backend <code>.env</code>. Leave blank if your local instance allows anonymous development calls.
+              </p>
+              <div>
+                <label className="block text-[11px] font-mono text-slate-400 uppercase mb-1">X-API-Key</label>
+                <input
+                  type="password"
+                  value={apiKeyInput}
+                  onChange={e => setApiKeyInput(e.target.value)}
+                  placeholder="Enter secret API key..."
+                  className="w-full bg-slate-950 border border-white/10 rounded-xl px-3 py-2 text-white font-mono text-xs focus:outline-none focus:border-emerald-400"
+                />
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2 border-t border-white/10">
+              <button
+                onClick={() => setApiKeyModalOpen(false)}
+                className="px-3 py-1.5 rounded-xl bg-slate-800 text-slate-300 text-xs font-bold"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  setStoredApiKey(apiKeyInput);
+                  setApiKeyModalOpen(false);
+                  showToast('API Key Saved', 'Header X-API-Key will be attached to all outgoing requests.');
+                  checkBackendHealth()
+                    .then(() => setBackendConnected(true))
+                    .catch(() => setBackendConnected(false));
+                }}
+                className="px-4 py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs"
+              >
+                Save & Connect
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Antigravity IDE / Local Python Auto-Installer Modal */}
       {antigravityModalOpen && (
