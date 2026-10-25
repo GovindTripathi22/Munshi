@@ -101,6 +101,7 @@ class HITLResumeRequest(BaseModel):
 # REST API Endpoints
 # ---------------------------------------------------------
 @app.get("/health")
+@app.get("/api/health")
 @app.get("/")
 def health() -> Dict[str, Any]:
     engine = get_shared_engine()
@@ -130,6 +131,7 @@ def health() -> Dict[str, Any]:
     }
 
 @app.post("/v1/workflows/run", dependencies=[Depends(verify_api_key)])
+@app.post("/api/v1/workflows/run", dependencies=[Depends(verify_api_key)])
 def run_workflow(req: WorkflowRequest) -> Dict[str, Any]:
     thread_id = req.thread_id or str(uuid.uuid4())
     orch = get_or_create_orchestrator(thread_id)
@@ -200,6 +202,7 @@ def run_workflow(req: WorkflowRequest) -> Dict[str, Any]:
     }
 
 @app.post("/v1/workflows/{thread_id}/hitl", dependencies=[Depends(verify_api_key)])
+@app.post("/api/v1/workflows/{thread_id}/hitl", dependencies=[Depends(verify_api_key)])
 def resume_hitl(
     thread_id: str,
     decision: HITLResumeRequest,
@@ -254,26 +257,31 @@ def resume_hitl(
         }
 
 @app.get("/v1/ledger/trial-balance", dependencies=[Depends(verify_api_key)])
+@app.get("/api/v1/ledger/trial-balance", dependencies=[Depends(verify_api_key)])
 def get_trial_balance(thread_id: str = "default") -> Dict[str, Any]:
     orch = get_or_create_orchestrator(thread_id)
     return orch.ledger.get_trial_balance()
 
 @app.get("/v1/ledger/pnl", dependencies=[Depends(verify_api_key)])
+@app.get("/api/v1/ledger/pnl", dependencies=[Depends(verify_api_key)])
 def get_pnl(thread_id: str = "default") -> Dict[str, Any]:
     orch = get_or_create_orchestrator(thread_id)
     return orch.ledger.get_profit_and_loss()
 
 @app.get("/v1/ledger/balance-sheet", dependencies=[Depends(verify_api_key)])
+@app.get("/api/v1/ledger/balance-sheet", dependencies=[Depends(verify_api_key)])
 def get_balance_sheet(thread_id: str = "default") -> Dict[str, Any]:
     orch = get_or_create_orchestrator(thread_id)
     return orch.ledger.get_balance_sheet()
 
 @app.get("/v1/gst/gstr3b", dependencies=[Depends(verify_api_key)])
+@app.get("/api/v1/gst/gstr3b", dependencies=[Depends(verify_api_key)])
 def get_gstr3b(thread_id: str = "default") -> Dict[str, Any]:
     orch = get_or_create_orchestrator(thread_id)
     return orch.gst_agent.generate_gstr3b_summary(orch.ledger.entries)
 
 @app.get("/v1/audit/findings", dependencies=[Depends(verify_api_key)])
+@app.get("/api/v1/audit/findings", dependencies=[Depends(verify_api_key)])
 def get_audit_findings(thread_id: str = "default") -> Dict[str, Any]:
     orch = get_or_create_orchestrator(thread_id)
     flags = orch.auditor.audit_entries(orch.ledger.entries, orch.ledger.audit_trail)
@@ -284,6 +292,7 @@ def get_audit_findings(thread_id: str = "default") -> Dict[str, Any]:
     }
 
 @app.get("/v1/benchmark", dependencies=[Depends(verify_api_key)])
+@app.get("/api/v1/benchmark", dependencies=[Depends(verify_api_key)])
 def run_benchmark_endpoint() -> Dict[str, Any]:
     return run_munshi_benchmark()
 
